@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react'
-import { Input, Tabs, Typography, Spin, Empty, Button, AutoComplete } from 'antd'
-import { SearchOutlined, RobotOutlined, ClockCircleOutlined } from '@ant-design/icons'
+import { Input, Tabs, Typography, Spin, Empty, Button, AutoComplete, Select } from 'antd'
+import { SearchOutlined, RobotOutlined, ClockCircleOutlined, SwapOutlined } from '@ant-design/icons'
 import { motion } from 'framer-motion'
 import { useNavigate } from 'react-router-dom'
 import { useStore } from '../stores/useStore'
@@ -66,8 +66,18 @@ export default function HomeView() {
     [store]
   )
 
-  const { wallVideos, loading, classes, activeClassId, wallTitle, searchProgress, wallMode, searchKeyword, searchHistory, sources, configUrl } = store
+  const { wallVideos, loading, classes, activeClassId, wallTitle, searchProgress, wallMode, searchKeyword, searchHistory, sources, configUrl, selectedSourceUid } = store
   const isSearching = wallMode === 'search'
+
+  // 首页初始列表的数据源：只影响下面的列表展示，搜索仍按「搜索设置」的范围执行
+  const sourceOptions = useMemo(
+    () => (sources || []).map((s) => ({ value: s.uid, label: s.name || s.uid })),
+    [sources],
+  )
+  const currentSourceName = useMemo(
+    () => (sources || []).find((s) => s.uid === selectedSourceUid)?.name || '',
+    [sources, selectedSourceUid],
+  )
 
   const tabItems = [
     { key: '__home__', label: '推荐' },
@@ -95,10 +105,31 @@ export default function HomeView() {
           boxShadow: '0 1px 3px rgba(0,0,0,0.04)',
         }}
       >
-        <div style={{ marginBottom: 16 }}>
+        <div
+          style={{
+            marginBottom: 16,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 12,
+            flexWrap: 'wrap',
+          }}
+        >
           <Title level={3} style={{ margin: 0, fontWeight: 700, color: '#1a1a2e' }}>
             {wallTitle || '发现'}
           </Title>
+          {/* 切换片源：决定下面初始列表用哪个源的数据，不影响搜索范围 */}
+          <Select
+            value={selectedSourceUid || undefined}
+            onChange={(v) => store.selectSource(v)}
+            options={sourceOptions}
+            placeholder="切换片源"
+            style={{ minWidth: 190, maxWidth: 300 }}
+            showSearch
+            optionFilterProp="label"
+            disabled={searchProgress.active}
+            suffixIcon={<SwapOutlined />}
+            title={currentSourceName ? `当前片源：${currentSourceName}` : '切换片源'}
+          />
         </div>
 
         <AutoComplete
