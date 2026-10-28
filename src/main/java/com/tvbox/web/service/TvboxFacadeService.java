@@ -415,7 +415,7 @@ public class TvboxFacadeService {
         CachedPlayResult cached = playCache.get(cacheKey);
         if (cached != null && !cached.isExpired()) {
             log.info("[PLAY] cache hit for key={} flag={} id={}", key, flag, id);
-            return cached.result;
+            return applyDirectPlay(safeSite(sessionId, key), cached.result);
         }
 
         SiteDefinition site = getSite(sessionId, key);
@@ -445,7 +445,23 @@ public class TvboxFacadeService {
         }
 
         playCache.put(cacheKey, new CachedPlayResult(result));
-        return result;
+        return applyDirectPlay(site, result);
+    }
+
+    /** 免代理直连：片源勾了「不需要代理」时，把代理地址还原成原始地址。 */
+    private JsonNode applyDirectPlay(SiteDefinition site, JsonNode result) {
+        if (site == null || !site.isDirectPlay()) {
+            return result;
+        }
+        return unproxyPlayUrl(result);
+    }
+
+    private SiteDefinition safeSite(String sessionId, String key) {
+        try {
+            return getSite(sessionId, key);
+        } catch (Exception ex) {
+            return null;
+        }
     }
 
     public Map<String, Object> health() {
@@ -543,5 +559,52 @@ public class TvboxFacadeService {
                 || lower.startsWith("thunder:")
                 || lower.startsWith("ed2k://")
                 || lower.startsWith("//");
+    }
+
+    /**
+     * 把本站代理地址还原成原始地址。
+     *
+     * <p>代理地址形如 {@code http://host/proxy?do=ts&url=<urlencode(原始地址)>&headers=…}，
+     * 这里取出 {@code url} 参数并解码。不是代理地址时原样返回。
+     */
+    private JsonNode unproxyPlayUrl(JsonNode result) {
+        if (result == null || !result.isObject()) {
+            return result;
+        }
+        ObjectNode node = (ObjectNode) result;
+        JsonNode urlNode = node.get("url");
+        if (urlNode == null || !urlNode.isTextual()) {
+            return result;
+        }
+        String restored = extractOriginalUrl(urlNode.asText());
+        if (restored == null) {
+            return result;
+        }
+        // 深拷贝：播放缓存里保留爬虫原始结果，不能就地改写
+        ObjectNode copy = node.deepCopy();
+        copy.put("url", restored);
+        log.debug("[PLAY] 免代理直连，地址已还原: {}", restored);
+        return copy;
+    }
+
+    private static String extractOriginalUrl(String url) {
+        if (url == null) {
+            return null;
+        }
+        int idx = url.indexOf("/proxy?");
+        if (idx < 0) {
+            return null;
+        }
+        String query = url.substring(idx + "/proxy?".length());
+        for (String pair : query.split("&")) {
+            if (pair.startsWith("url=")) {
+                try {
+                    return java.net.URLDecoder.decode(pair.substring(4), java.nio.charset.StandardCharsets.UTF_8);
+                } catch (Exception ex) {
+                    return null;
+                }
+            }
+        }
+        return null;
     }
 }

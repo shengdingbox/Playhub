@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import {
-  Button, Card, Empty, Input, Modal, Popconfirm, Space, Table, Tabs, Tag, Typography, message,
+  Button, Card, Empty, Form, Input, Modal, Popconfirm, Select, Space, Switch,
+  Table, Tabs, Tag, Typography, message,
 } from 'antd'
 import {
-  CloudDownloadOutlined, DeleteOutlined, ImportOutlined, PlayCircleOutlined,
+  CloudDownloadOutlined, DeleteOutlined, EditOutlined, ImportOutlined, PlayCircleOutlined,
   ReloadOutlined, VideoCameraOutlined,
 } from '@ant-design/icons'
 import { motion } from 'framer-motion'
@@ -35,7 +36,7 @@ export default function SourcesView() {
   const importSources = useStore((s) => s.importSources)
   const deleteSource = useStore((s) => s.deleteSource)
   const setSourceEnabled = useStore((s) => s.setSourceEnabled)
-  const setSourceKind = useStore((s) => s.setSourceKind)
+  const updateSource = useStore((s) => s.updateSource)
 
   const [kindTab, setKindTab] = useState('vod')
   const [importOpen, setImportOpen] = useState(false)
@@ -43,6 +44,9 @@ export default function SourcesView() {
   const [importTab, setImportTab] = useState('json')
   const [jsonText, setJsonText] = useState('')
   const [configUrl, setConfigUrl] = useState('')
+  const [editing, setEditing] = useState(null)
+  const [savingEdit, setSavingEdit] = useState(false)
+  const [editForm] = Form.useForm()
 
   useEffect(() => {
     loadSources()
@@ -69,18 +73,34 @@ export default function SourcesView() {
     }
   }
 
-  const toggleKind = useCallback(
-    async (row) => {
-      const next = row.kind === 'live' ? 'vod' : 'live'
-      try {
-        await setSourceKind(row.id, next)
-        message.success(`已改为${next === 'live' ? '直播源' : '影视源'}`)
-      } catch (err) {
-        message.error(err?.message || '修改分类失败')
-      }
+  const openEdit = useCallback(
+    (row) => {
+      setEditing(row)
+      editForm.setFieldsValue({
+        name: row.name || '',
+        kind: row.kind === 'live' ? 'live' : 'vod',
+        directPlay: !!row.directPlay,
+        enabled: !!row.enabled,
+      })
     },
-    [setSourceKind]
+    [editForm]
   )
+
+  const submitEdit = async () => {
+    if (!editing) return
+    try {
+      const values = await editForm.validateFields()
+      setSavingEdit(true)
+      await updateSource(editing.id, values)
+      message.success('已保存')
+      setEditing(null)
+    } catch (err) {
+      if (err?.errorFields) return // 表单校验失败
+      message.error(err?.message || '保存失败')
+    } finally {
+      setSavingEdit(false)
+    }
+  }
 
   const columns = [
     {
@@ -102,6 +122,13 @@ export default function SourcesView() {
       render: (t) => <Tag color="blue">{TYPE_LABEL[t] || `type ${t}`}</Tag>,
     },
     {
+      title: '代理',
+      dataIndex: 'directPlay',
+      width: 90,
+      render: (directPlay) =>
+        directPlay ? <Tag color="cyan">直连</Tag> : <Tag color="default">走代理</Tag>,
+    },
+    {
       title: '能力',
       width: 140,
       render: (_, row) => (
@@ -117,11 +144,11 @@ export default function SourcesView() {
       width: 250,
       render: (_, row) => (
         <Space size={4} wrap>
+          <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(row)}>
+            编辑
+          </Button>
           <Button size="small" onClick={() => setSourceEnabled(row.id, !row.enabled)}>
             {row.enabled ? '停用' : '启用'}
-          </Button>
-          <Button size="small" onClick={() => toggleKind(row)}>
-            {row.kind === 'live' ? '设为影视源' : '设为直播源'}
           </Button>
           <Popconfirm
             title="删除该片源？"
@@ -228,6 +255,46 @@ export default function SourcesView() {
           )}
         </Card>
       )}
+
+      <Modal
+        title={editing ? `编辑片源：${editing.name || ''}` : '编辑片源'}
+        open={!!editing}
+        onCancel={() => setEditing(null)}
+        onOk={submitEdit}
+        confirmLoading={savingEdit}
+        okText="保存"
+        cancelText="取消"
+        width={520}
+      >
+        <Form form={editForm} layout="vertical" style={{ marginTop: 8 }}>
+          <Form.Item
+            label="片源名称"
+            name="name"
+            rules={[{ required: true, message: '请输入名称' }]}
+          >
+            <Input placeholder="显示在片源列表里的名称" />
+          </Form.Item>
+          <Form.Item label="分类" name="kind">
+            <Select
+              options={[
+                { label: '影视源', value: 'vod' },
+                { label: '直播源', value: 'live' },
+              ]}
+            />
+          </Form.Item>
+          <Form.Item
+            label="免代理直连播放"
+            name="directPlay"
+            valuePropName="checked"
+            extra="开启后播放时不再经本站 /proxy 中转，直接把原始地址交给播放器。适合地址本身可以直连的片源，能显著节省服务器带宽；若开启后播放失败（需要特定 Referer 等），请关掉。"
+          >
+            <Switch checkedChildren="直连" unCheckedChildren="走代理" />
+          </Form.Item>
+          <Form.Item label="启用" name="enabled" valuePropName="checked">
+            <Switch checkedChildren="启用" unCheckedChildren="停用" />
+          </Form.Item>
+        </Form>
+      </Modal>
 
       <Modal
         title="导入 TVBox 片源"

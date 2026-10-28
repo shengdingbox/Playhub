@@ -137,6 +137,7 @@ public class DatabaseService {
                         name          TEXT,
                         type          INTEGER NOT NULL DEFAULT 3,
                         kind          TEXT    NOT NULL DEFAULT 'vod',
+                        direct_play   INTEGER NOT NULL DEFAULT 0,
                         ext           TEXT,
                         jar           TEXT,
                         source_key    TEXT,
@@ -152,6 +153,7 @@ public class DatabaseService {
                     )
                     """);
             // 兼容早期版本的库：没有 kind 列时补上（vod=影视源 / live=直播源）
+            ensureColumn(st, "sources", "direct_play", "INTEGER NOT NULL DEFAULT 0");
             boolean kindAdded = ensureColumn(st, "sources", "kind", "TEXT NOT NULL DEFAULT 'vod'");
             if (kindAdded) {
                 // 新增列时已有记录都会是默认的 vod，这里按名称把直播类片源纠正过来

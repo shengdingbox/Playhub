@@ -1,0 +1,87 @@
+# ==============================================================================
+# PlayHub 一键部署
+#
+#   docker compose up -d --build
+#
+# 需要持久化的内容已全部映射到宿主机目录（见 volumes 段）：
+#   ./data           SQLite 数据库（用户/播放记录/片源库）、配置缓存、加固包缓存、dex 转换产物
+#   ./logs           应用日志
+#   ./android-cache  模拟 Android 的存储（SharedPreferences、外部存储、私有目录），
+#                    部分爬虫会把登录态/配置存在这里
+#
+# 首次启动会自动创建管理员账号，默认 admin / playhub（务必在 .env 或下方 environment 里改）。
+# ==============================================================================
+
+services:
+  playhub:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: play:latest
+    container_name: playhub
+    restart: unless-stopped
+
+    ports:
+      - "${APP_PORT:-18080}:18080"
+
+    environment:
+      # ── 基础 ────────────────────────────────────────────
+      APP_PORT: 18080
+      TZ: ${TZ:-Asia/Shanghai}
+      LANG: C.UTF-8
+
+      # ── 管理员账号（仅首次启动生效，已存在则不会重置密码）──
+      APP_ADMIN_ENABLED: ${APP_ADMIN_ENABLED:-true}
+      APP_ADMIN_USERNAME: ${APP_ADMIN_USERNAME:-admin}
+      APP_ADMIN_PASSWORD: ${APP_ADMIN_PASSWORD:-playhub}
+
+      # ── 持久化路径（与下方 volumes 对应，一般不用改）──────
+      APP_CACHE_DIR: /opt/playhub/data/cache
+      APP_LOG_FILE: /opt/playhub/logs/playhub.log
+
+      # ── JVM ─────────────────────────────────────────────
+      # 小内存机器可调低 -Xmx；低于 512m 容器内存容易 OOM
+      JAVA_OPTS: >-
+        -Xms64m -Xmx512m
+        -XX:+UseG1GC
+        -XX:MaxGCPauseMillis=200
+        -XX:+HeapDumpOnOutOfMemoryError
+        -XX:HeapDumpPath=/opt/playhub/logs/
+
+      # ── 爬虫执行器 ──────────────────────────────────────
+      APP_SPIDER_OPERATION_MAX_CONCURRENCY: ${APP_SPIDER_OPERATION_MAX_CONCURRENCY:-2}
+      APP_SCRIPT_MAX_CONCURRENCY: ${APP_SCRIPT_MAX_CONCURRENCY:-2}
+      DEX2JAR_COMMAND: __AUTO__
+      NODE_COMMAND: node
+      PYTHON_COMMAND: python3
+
+      # ── 可选：跨站兜底桥（默认关闭，内容来自别的站）──────
+      SPIDER_BRIDGE_URL: ${SPIDER_BRIDGE_URL:-}
+
+    volumes:
+      # 数据库 + 各类缓存（最重要，务必持久化）
+      - ./data:/opt/playhub/data
+      # 日志
+      - ./logs:/opt/playhub/logs
+      # Android 模拟存储（爬虫登录态 / 配置）
+      - ./android-cache:/opt/playhub/.cache
+
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:18080/api/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+
+    # 适当放宽容器的日志大小，避免长期运行把磁盘写满
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+    deploy:
+      resources:
+        limits:
+          # 与 JAVA_OPTS 的 -Xmx 配合使用；机器小可降到 768M
+          memory: 1G

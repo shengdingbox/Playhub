@@ -119,6 +119,10 @@ export function listSources(kind) {
   return getJson('/api/sources', { params: kind ? { kind } : {}, silent: true })
 }
 
+export function updateSource(id, patch) {
+  return client.patch(`/api/sources/${id}`, patch, { silent: true }).then((r) => r.data)
+}
+
 export function setSourceKind(id, kind) {
   return client.patch(`/api/sources/${id}/kind`, { kind }, { silent: true }).then((r) => r.data)
 }

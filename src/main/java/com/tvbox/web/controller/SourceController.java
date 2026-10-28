@@ -53,6 +53,10 @@ public class SourceController {
     public record KindRequest(String kind) {
     }
 
+    /** 编辑片源：字段为 null 表示不修改。 */
+    public record UpdateRequest(String name, String kind, Boolean directPlay, Boolean enabled) {
+    }
+
     /**
      * 片源列表；管理员能看到被停用的，普通用户只看启用的。
      *
@@ -186,6 +190,28 @@ public class SourceController {
         } catch (Exception ex) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                     .body(Map.of("message", ex.getMessage()));
+        }
+    }
+
+    /** 编辑片源（名称 / 分类 / 免代理直连 / 启用），仅管理员。 */
+    @PatchMapping("/{id}")
+    public ResponseEntity<?> update(@PathVariable long id, @RequestBody UpdateRequest body,
+                                    HttpSession session) {
+        if (!AuthGuard.isAdmin(session)) {
+            return forbidden();
+        }
+        try {
+            boolean ok = sourceService.updateSource(id,
+                    body == null ? null : body.name(),
+                    body == null ? null : body.kind(),
+                    body == null ? null : body.directPlay(),
+                    body == null ? null : body.enabled());
+            // 名称/启停会影响构建出的配置，清缓存让改动立即生效
+            configService.invalidateAllSessionPayloads();
+            return ResponseEntity.ok(Map.of("success", ok));
+        } catch (Exception ex) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("message", "保存失败: " + ex.getMessage()));
         }
     }
 

@@ -24,6 +24,8 @@ public class SiteDefinition {
     @JsonProperty("click")
     private String clickSelector = "";
     private List<String> categories = new ArrayList<>();
+    /** 免代理直连播放：为 true 时不走本站 /proxy 中转，直接把原始地址交给播放器。 */
+    private boolean directPlay = false;
 
     public String getUid() {
         return uid;
@@ -142,5 +144,13 @@ public class SiteDefinition {
 
     public void setCategories(List<String> categories) {
         this.categories = categories;
+    }
+
+    public boolean isDirectPlay() {
+        return directPlay;
+    }
+
+    public void setDirectPlay(boolean directPlay) {
+        this.directPlay = directPlay;
     }
 }

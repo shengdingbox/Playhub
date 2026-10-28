@@ -296,6 +296,13 @@ export const useStore = create((set, get) => ({
     await get().loadFromServer()
   },
 
+  /** 管理员编辑片源（名称 / 分类 / 免代理直连 / 启用）。 */
+  async updateSource(id, patch) {
+    await api.updateSource(id, patch)
+    await get().loadSources()
+    await get().loadFromServer()
+  },
+
   /** 管理员调整片源分类（影视源 / 直播源）。 */
   async setSourceKind(id, kind) {
     await api.setSourceKind(id, kind)

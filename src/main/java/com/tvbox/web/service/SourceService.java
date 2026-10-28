@@ -64,6 +64,7 @@ public class SourceService {
             int searchable,
             int quickSearch,
             int filterable,
+            boolean directPlay,
             boolean enabled,
             int sortOrder,
             long updatedAt
@@ -247,7 +248,7 @@ public class SourceService {
     public List<SourceRow> list(boolean includeDisabled, String kind) throws SQLException {
         StringBuilder sql = new StringBuilder("""
                 SELECT id, uid, api, name, type, kind, ext, jar, source_key, play_url, categories,
-                       searchable, quick_search, filterable, enabled, sort_order, updated_at
+                       searchable, quick_search, filterable, direct_play, enabled, sort_order, updated_at
                   FROM sources
                 """);
         List<String> conditions = new ArrayList<>();
@@ -277,12 +278,55 @@ public class SourceService {
                             rs.getString("jar"), rs.getString("source_key"), rs.getString("play_url"),
                             rs.getString("categories"), rs.getInt("searchable"),
                             rs.getInt("quick_search"), rs.getInt("filterable"),
+                            rs.getInt("direct_play") != 0,
                             rs.getInt("enabled") != 0, rs.getInt("sort_order"),
                             rs.getLong("updated_at")));
                 }
             }
         }
         return out;
+    }
+
+    /**
+     * 编辑片源（仅管理员）：名称、分类、免代理直连、启用状态。
+     * 传 null 的字段表示不修改。
+     */
+    public boolean updateSource(long id, String name, String kind, Boolean directPlay,
+                                Boolean enabled) throws SQLException {
+        java.util.List<String> sets = new ArrayList<>();
+        java.util.List<Object> values = new ArrayList<>();
+        if (name != null) {
+            sets.add("name = ?");
+            values.add(name.trim());
+        }
+        if (kind != null) {
+            sets.add("kind = ?");
+            values.add(KIND_LIVE.equalsIgnoreCase(kind) ? KIND_LIVE : KIND_VOD);
+        }
+        if (directPlay != null) {
+            sets.add("direct_play = ?");
+            values.add(directPlay ? 1 : 0);
+        }
+        if (enabled != null) {
+            sets.add("enabled = ?");
+            values.add(enabled ? 1 : 0);
+        }
+        if (sets.isEmpty()) {
+            return false;
+        }
+        sets.add("updated_at = ?");
+        values.add(System.currentTimeMillis());
+        values.add(id);
+
+        String sql = "UPDATE sources SET " + String.join(", ", sets) + " WHERE id = ?";
+        synchronized (db.writeLock()) {
+            try (Connection conn = db.open(); PreparedStatement ps = conn.prepareStatement(sql)) {
+                for (int i = 0; i < values.size(); i++) {
+                    ps.setObject(i + 1, values.get(i));
+                }
+                return ps.executeUpdate() > 0;
+            }
+        }
     }
 
     /** 修改片源分类（仅管理员）。 */
@@ -415,6 +459,7 @@ public class SourceService {
             site.setSearchable(row.searchable());
             site.setQuickSearch(row.quickSearch());
             site.setFilterable(row.filterable());
+            site.setDirectPlay(row.directPlay());
             if (StringUtils.hasText(row.ext())) {
                 try {
                     site.setExt(mapper.readTree(row.ext()));
@@ -441,6 +486,7 @@ public class SourceService {
         m.put("searchable", row.searchable());
         m.put("quickSearch", row.quickSearch());
         m.put("filterable", row.filterable());
+        m.put("directPlay", row.directPlay());
         m.put("hasExt", StringUtils.hasText(row.ext()));
         m.put("updatedAt", row.updatedAt());
         return m;
