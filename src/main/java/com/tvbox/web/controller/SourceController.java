@@ -53,8 +53,9 @@ public class SourceController {
     public record KindRequest(String kind) {
     }
 
-    /** 编辑片源：字段为 null 表示不修改。 */
-    public record UpdateRequest(String name, String kind, Boolean directPlay, Boolean enabled) {
+    /** 编辑片源：字段为 null 表示不修改；ext 传空字符串表示清空。 */
+    public record UpdateRequest(String name, String kind, Boolean directPlay, Boolean enabled,
+                                String ext) {
     }
 
     /**
@@ -193,7 +194,32 @@ public class SourceController {
         }
     }
 
-    /** 编辑片源（名称 / 分类 / 免代理直连 / 启用），仅管理员。 */
+    /** 单条片源详情（含完整 ext），供编辑表单回填。仅管理员。 */
+    @GetMapping("/{id}")
+    public ResponseEntity<?> detail(@PathVariable long id, HttpSession session) {
+        if (!AuthGuard.isAdmin(session)) {
+            return forbidden();
+        }
+        try {
+            SourceService.SourceRow row = sourceService.getById(id);
+            if (row == null) {
+                return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                        .body(Map.of("message", "片源不存在"));
+            }
+            Map<String, Object> m = sourceService.toPublicMap(row);
+            // 编辑需要看到 ext 原文（列表接口出于体积考虑不返回）
+            m.put("ext", row.ext());
+            m.put("jar", row.jar());
+            m.put("sourceKey", row.sourceKey());
+            m.put("playUrl", row.playUrl());
+            return ResponseEntity.ok(m);
+        } catch (Exception ex) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("message", "读取片源失败: " + ex.getMessage()));
+        }
+    }
+
+    /** 编辑片源（名称 / 分类 / 免代理直连 / 启用 / ext），仅管理员。 */
     @PatchMapping("/{id}")
     public ResponseEntity<?> update(@PathVariable long id, @RequestBody UpdateRequest body,
                                     HttpSession session) {
@@ -205,7 +231,8 @@ public class SourceController {
                     body == null ? null : body.name(),
                     body == null ? null : body.kind(),
                     body == null ? null : body.directPlay(),
-                    body == null ? null : body.enabled());
+                    body == null ? null : body.enabled(),
+                    body == null ? null : body.ext());
             // 名称/启停会影响构建出的配置，清缓存让改动立即生效
             configService.invalidateAllSessionPayloads();
             return ResponseEntity.ok(Map.of("success", ok));

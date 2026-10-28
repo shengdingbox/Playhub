@@ -9,6 +9,7 @@ import {
 } from '@ant-design/icons'
 import { motion } from 'framer-motion'
 import { useStore } from '../stores/useStore'
+import * as api from '../api'
 
 const { Title, Text, Paragraph } = Typography
 const { TextArea } = Input
@@ -74,14 +75,22 @@ export default function SourcesView() {
   }
 
   const openEdit = useCallback(
-    (row) => {
+    async (row) => {
       setEditing(row)
+      // 先用列表里的字段渲染，ext 体积大、列表接口不返回，再单独拉一次
       editForm.setFieldsValue({
         name: row.name || '',
         kind: row.kind === 'live' ? 'live' : 'vod',
         directPlay: !!row.directPlay,
         enabled: !!row.enabled,
+        ext: '',
       })
+      try {
+        const detail = await api.getSource(row.id)
+        editForm.setFieldValue('ext', detail?.ext || '')
+      } catch (err) {
+        console.warn('读取 ext 失败:', err?.message)
+      }
     },
     [editForm]
   )
@@ -280,6 +289,33 @@ export default function SourcesView() {
                 { label: '影视源', value: 'vod' },
                 { label: '直播源', value: 'live' },
               ]}
+            />
+          </Form.Item>
+          <Form.Item
+            label="ext 配置"
+            name="ext"
+            extra={'站点额外配置。可以是 JSON 对象（如 {"host":"https://..."}）、一个网址，或留空表示无配置。以 { 或 [ 开头时会按 JSON 校验。'}
+            rules={[
+              {
+                validator: (_, value) => {
+                  const text = (value || '').trim()
+                  if (!text || (!text.startsWith('{') && !text.startsWith('['))) {
+                    return Promise.resolve()
+                  }
+                  try {
+                    JSON.parse(text)
+                    return Promise.resolve()
+                  } catch (err) {
+                    return Promise.reject(new Error(`JSON 格式错误：${err.message}`))
+                  }
+                },
+              },
+            ]}
+          >
+            <Input.TextArea
+              rows={6}
+              placeholder='例如：{"host":"https://api.example.com","key":"xxx"}'
+              style={{ fontFamily: 'monospace', fontSize: 12 }}
             />
           </Form.Item>
           <Form.Item

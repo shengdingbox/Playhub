@@ -292,7 +292,7 @@ public class SourceService {
      * 传 null 的字段表示不修改。
      */
     public boolean updateSource(long id, String name, String kind, Boolean directPlay,
-                                Boolean enabled) throws SQLException {
+                                Boolean enabled, String ext) throws SQLException {
         java.util.List<String> sets = new ArrayList<>();
         java.util.List<Object> values = new ArrayList<>();
         if (name != null) {
@@ -311,6 +311,11 @@ public class SourceService {
             sets.add("enabled = ?");
             values.add(enabled ? 1 : 0);
         }
+        if (ext != null) {
+            // 空串表示清空 ext
+            sets.add("ext = ?");
+            values.add(ext.isBlank() ? null : ext.trim());
+        }
         if (sets.isEmpty()) {
             return false;
         }
@@ -325,6 +330,34 @@ public class SourceService {
                     ps.setObject(i + 1, values.get(i));
                 }
                 return ps.executeUpdate() > 0;
+            }
+        }
+    }
+
+    /** 按 id 取单条片源（含完整 ext），供编辑表单回填。 */
+    public SourceRow getById(long id) throws SQLException {
+        String sql = """
+                SELECT id, uid, api, name, type, kind, ext, jar, source_key, play_url, categories,
+                       searchable, quick_search, filterable, direct_play, enabled, sort_order, updated_at
+                  FROM sources
+                 WHERE id = ?
+                """;
+        try (Connection conn = db.open(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, id);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) {
+                    return null;
+                }
+                return new SourceRow(
+                        rs.getLong("id"), rs.getString("uid"), rs.getString("api"),
+                        rs.getString("name"), rs.getInt("type"), rs.getString("kind"),
+                        rs.getString("ext"),
+                        rs.getString("jar"), rs.getString("source_key"), rs.getString("play_url"),
+                        rs.getString("categories"), rs.getInt("searchable"),
+                        rs.getInt("quick_search"), rs.getInt("filterable"),
+                        rs.getInt("direct_play") != 0,
+                        rs.getInt("enabled") != 0, rs.getInt("sort_order"),
+                        rs.getLong("updated_at"));
             }
         }
     }
