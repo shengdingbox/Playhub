@@ -1,0 +1,23 @@
+--- com/github/catvod/spider/merge.C0084bb.m1273 (x1) [3 语句]
+int i = C0009.m276();
+int i2 = 1616;
+while (true) {
+            i2 ^= 1633;
+            switch (i2) {
+                case 14:
+                    break;
+                case 49:
+                    if (i <= 0) {
+                        break;
+                    } else {
+                        i2 = 1709;
+                        continue;
+                    }
+                case 204:
+                    return yq;
+                case 239:
+                    int i3 = 1740;
+                    while (true) {
+                        i3 ^= 1757;
+                        switch (i3) {
+         

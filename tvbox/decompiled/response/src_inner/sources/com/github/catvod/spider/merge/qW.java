@@ -1,0 +1,41 @@
+package com.github.catvod.spider.merge;
+/* loaded from: E:\develop\workspace\private\Playhub\tvbox\decompiled\response\classes_inner.dex */
+public final class qW {
+    /* JADX INFO: Access modifiers changed from: package-private */
+    public static boolean SN(CharSequence charSequence, boolean z, int i, CharSequence charSequence2, int i2) {
+        if ((charSequence instanceof String) && (charSequence2 instanceof String)) {
+            return ((String) charSequence).regionMatches(z, i, (String) charSequence2, 0, i2);
+        }
+        int length = charSequence.length() - i;
+        int length2 = charSequence2.length() - 0;
+        if (i < 0 || i2 < 0 || length < i2 || length2 < i2) {
+            return false;
+        }
+        int i3 = 0;
+        while (true) {
+            i2--;
+            if (i2 <= 0) {
+                return true;
+            }
+            i++;
+            char charAt = charSequence.charAt(i);
+            i3++;
+            char charAt2 = charSequence2.charAt(i3);
+            if (charAt != charAt2) {
+                if (!z) {
+                    return false;
+                }
+                char upperCase = Character.toUpperCase(charAt);
+                char upperCase2 = Character.toUpperCase(charAt2);
+                if (!(upperCase == upperCase2 || Character.toLowerCase(upperCase) == Character.toLowerCase(upperCase2))) {
+                    return false;
+                }
+            }
+        }
+    }
+
+    /* JADX INFO: Access modifiers changed from: package-private */
+    public static int yq(CharSequence charSequence, CharSequence charSequence2, int i) {
+        return charSequence instanceof String ? ((String) charSequence).indexOf(charSequence2.toString(), i) : charSequence instanceof StringBuilder ? ((StringBuilder) charSequence).indexOf(charSequence2.toString(), i) : charSequence instanceof StringBuffer ? ((StringBuffer) charSequence).indexOf(charSequence2.toString(), i) : charSequence.toString().indexOf(charSequence2.toString(), i);
+    }
+}
