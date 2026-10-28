@@ -31,7 +31,11 @@ ARG GITHUB_PROXY=https://gh-proxy.com
 LABEL org.opencontainers.image.title="playhub"
 LABEL org.opencontainers.image.description="TVBox Web frontend/backend runtime image"
 
-ENV APP_PORT=18080 \
+# 容器默认 POSIX locale，中文日志会变成 "??"，显式指定 UTF-8
+ENV LANG=C.UTF-8 \
+    LANGUAGE=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    APP_PORT=18080 \
     APP_CACHE_DIR=/opt/playhub/data/cache \
     APP_LOG_FILE=/opt/playhub/logs/playhub.log \
     DEX2JAR_COMMAND=__AUTO__ \
