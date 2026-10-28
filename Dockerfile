@@ -85,9 +85,15 @@ RUN set -eux; \
     fi; \
     cat /etc/pip.conf 2>/dev/null || true
 
-# ── 3) Python 爬虫运行时依赖（少了这两个，py 源会直接失败）──────────────────
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip3 install --no-cache-dir --break-system-packages \
+# ── 3) Python 爬虫运行时依赖（少了这些，py 源会直接失败）────────────────────
+# 注意：这里不使用 `RUN --mount=type=cache`，因为老版本 Docker（legacy builder，
+# 未安装 buildx）不支持该语法，会让构建在中途直接失败。
+# `--break-system-packages` 仅在 pip>=23 可用，因此保留一条不带该参数的兜底。
+RUN pip3 install --no-cache-dir --break-system-packages \
+        "requests>=2.31" \
+        "beautifulsoup4>=4.12" \
+        "lxml>=5.0" \
+    || pip3 install --no-cache-dir \
         "requests>=2.31" \
         "beautifulsoup4>=4.12" \
         "lxml>=5.0"
