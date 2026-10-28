@@ -18,6 +18,7 @@ import org.springframework.asm.ClassReader;
 import org.springframework.asm.ClassWriter;
 import org.springframework.asm.Opcodes;
 import org.springframework.asm.Type;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.beans.factory.DisposableBean;
 import org.springframework.beans.factory.InitializingBean;
@@ -109,8 +110,16 @@ public class JarSpiderService implements DisposableBean, InitializingBean {
     @Value("${app.spider-cache-max-spiders:48}")
     private int spiderCacheMaxSpiders;
 
+    /** 站点明文 ext 覆盖表（加密 ext 在桌面端无法解密，见 ExtOverrideService）。 */
+    @Autowired
+    private ExtOverrideService extOverrideService;
+
     private BoundedCache<String, URLClassLoader> classLoaderMap;
     private BoundedCache<String, Object> spiderMap;
+    /** 按站点串行化 Spider 创建，避免并发首次创建时的 jar 转换/类加载竞态。 */
+    private final Map<String, Object> spiderCreationLocks = new ConcurrentHashMap<>();
+    /** 按 jar 串行化 fty 加固还原，避免并发重写产物。 */
+    private final Map<String, Object> unguardLocks = new ConcurrentHashMap<>();
     private BoundedCache<String, Path> dexConvertedJarMap;
     private BoundedCache<String, Path> runtimePreparedJarMap;
     private BoundedCache<String, Method> proxyMethodMap;
@@ -138,7 +147,9 @@ public class JarSpiderService implements DisposableBean, InitializingBean {
     public void afterPropertiesSet() {
         int defaultConcurrency = Math.max(2, Math.min(4, Runtime.getRuntime().availableProcessors()));
         int concurrency = Math.max(1, spiderOperationMaxConcurrency > 0 ? spiderOperationMaxConcurrency : defaultConcurrency);
-        int queueCapacity = Math.max(1, spiderOperationQueueCapacity);
+        // 全站搜索会一次性提交所有站点（可达几十个），队列必须能全部装下，
+        // 否则超出「并发 + 队列」的站点会被 AbortPolicy 拒绝 → 该源搜索直接失败。
+        int queueCapacity = Math.max(128, spiderOperationQueueCapacity);
         BlockingQueue<Runnable> queue = new LinkedBlockingQueue<>(queueCapacity);
         ThreadPoolExecutor executor = new ThreadPoolExecutor(
                 concurrency,
@@ -386,11 +397,53 @@ public class JarSpiderService implements DisposableBean, InitializingBean {
                 obj.put("url", sanitizePlayableUrl(obj.get("url").asText()));
             }
         }
+        node = fixLocalProxyPort(node);
         return finalizePlayNode(site, node, flag, normalizedId);
     }
 
-    public JsonNode play(SiteDefinition site, String flag, String id, List<String> vipFlags) {
-        return play(null, site, flag, id, vipFlags);
+    /**
+     * 兜底修正：部分加固包生成的本地代理地址端口为 -1（端口字段未注入），
+     * 这里统一替换成应用真实端口，指向本服务的 /proxy。
+     */
+    private JsonNode fixLocalProxyPort(JsonNode node) {
+        Integer port = parseServerPort();
+        if (port == null || node == null) {
+            return node;
+        }
+        String broken = "127.0.0.1:-1";
+        String fixedHost = "127.0.0.1:" + port;
+        if (node.isTextual()) {
+            String text = node.asText();
+            if (!text.contains(broken)) {
+                return node;
+            }
+            return com.fasterxml.jackson.databind.node.TextNode.valueOf(text.replace(broken, fixedHost));
+        }
+        if (node.isObject()) {
+            ObjectNode object = (ObjectNode) node;
+            java.util.List<String> names = new java.util.ArrayList<>();
+            object.fieldNames().forEachRemaining(names::add);
+            for (String name : names) {
+                JsonNode value = object.get(name);
+                JsonNode fixed = fixLocalProxyPort(value);
+                if (fixed != value) {
+                    object.set(name, fixed);
+                }
+            }
+            return object;
+        }
+        if (node.isArray()) {
+            ArrayNode array = (ArrayNode) node;
+            for (int i = 0; i < array.size(); i++) {
+                JsonNode value = array.get(i);
+                JsonNode fixed = fixLocalProxyPort(value);
+                if (fixed != value) {
+                    array.set(i, fixed);
+                }
+            }
+            return array;
+        }
+        return node;
     }
 
     public JsonNode playLocal(SiteDefinition site, String flag, String id, List<String> vipFlags) {
@@ -425,9 +478,12 @@ public class JarSpiderService implements DisposableBean, InitializingBean {
                 DiagLog.step(log, "JAR 本地结果为空, 尝试bridge回退");
                 try {
                     JsonNode bridgeResult = bridgeExecutor.get();
-                    if (!isResultEmpty(bridgeResult)) {
+                    if (!isResultEmpty(bridgeResult) && !isErrorResult(bridgeResult)) {
                         DiagLog.step(log, "JAR bridge回退成功");
                         return bridgeResult;
+                    }
+                    if (isErrorResult(bridgeResult)) {
+                        DiagLog.step(log, "JAR bridge 返回错误, 忽略: " + bridgeResult.path("error").asText(""));
                     }
                 } catch (Throwable ex) {
                     DiagLog.step(log, "JAR bridge回退也失败: " + ex.getMessage());
@@ -435,16 +491,50 @@ public class JarSpiderService implements DisposableBean, InitializingBean {
             }
             return result;
         } catch (IllegalStateException ex) {
-            if (allowBridgeFallback && spiderBridgeService.enabled()) {
+            if (allowBridgeFallback && spiderBridgeService.enabled() && !isNetworkFailure(ex)) {
                 DiagLog.step(log, "JAR 本地执行异常, 尝试bridge回退");
                 try {
-                    return bridgeExecutor.get();
+                    JsonNode bridgeResult = bridgeExecutor.get();
+                    // 桥接可能返回 {"error":"spider not found: Xxx"}，
+                    // 这种不能当搜索结果返回，否则前端会显示成"无结果"且丢失本地错误语义。
+                    if (!isErrorResult(bridgeResult)) {
+                        return bridgeResult;
+                    }
+                    DiagLog.step(log, "JAR bridge 返回错误, 不使用: " + bridgeResult.path("error").asText(""));
                 } catch (Throwable bridgeEx) {
                     DiagLog.step(log, "JAR bridge回退失败: " + bridgeEx.getMessage());
                 }
             }
             throw ex;
         }
+    }
+
+    /**
+     * 网络类失败（目标站不可达/超时/域名解析失败）没必要再走桥接：
+     * 桥接用的是另一个爬虫实现，同样连不上目标站，只会白白拖长一次搜索。
+     */
+    private boolean isNetworkFailure(Throwable error) {
+        Throwable current = error;
+        int depth = 0;
+        while (current != null && depth++ < 8) {
+            if (current instanceof java.net.ConnectException
+                    || current instanceof java.net.SocketTimeoutException
+                    || current instanceof java.net.UnknownHostException
+                    || current instanceof java.net.NoRouteToHostException
+                    || current instanceof java.net.SocketException
+                    || current instanceof javax.net.ssl.SSLException
+                    || current instanceof java.io.InterruptedIOException
+                    || current instanceof java.nio.channels.UnresolvedAddressException) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
+    }
+
+    /** 桥接/爬虫返回的错误对象（形如 {"error":"..."}）不是可用结果。 */
+    private boolean isErrorResult(JsonNode node) {
+        return node != null && node.isObject() && node.hasNonNull("error") && !node.has("list");
     }
 
     private boolean isResultEmpty(JsonNode node) {
@@ -545,6 +635,25 @@ public class JarSpiderService implements DisposableBean, InitializingBean {
             return cached;
         }
 
+        // 全站搜索时同一站点可能被并发创建；jar 转换/类加载都不是并发安全的，
+        // 这里按站点串行化，避免互相删除转换产物导致 ClassNotFoundException。
+        Object creationLock = spiderCreationLocks.computeIfAbsent(spiderKey, k -> new Object());
+        synchronized (creationLock) {
+            Object rechecked = spiderMap.get(spiderKey);
+            if (rechecked != null) {
+                DiagLog.step(log, "JAR getOrCreateSpider 并发等待后命中缓存", t0);
+                return rechecked;
+            }
+            try {
+                return createSpiderLocked(sessionId, site, forceJvmCompatible, spiderKey, t0);
+            } finally {
+                spiderCreationLocks.remove(spiderKey, creationLock);
+            }
+        }
+    }
+
+    private Object createSpiderLocked(String sessionId, SiteDefinition site, boolean forceJvmCompatible,
+                                      String spiderKey, long t0) {
         DiagLog.step(log, "JAR getOrCreateSpider 缓存未命中  api=" + site.getApi());
         String baseName = site.getApi().replace("csp_", "");
 
@@ -561,6 +670,7 @@ public class JarSpiderService implements DisposableBean, InitializingBean {
                 if (jarPath == null) {
                     jarPath = resolveJar(sessionId, site);
                     DiagLog.step(log, "JAR resolveJar 完成  path=" + jarPath, t0);
+                    jarPath = ensureFtyUnguarded(jarPath);
                 }
                 Path loadPath = jarPath;
                 if (isDexOnlyJar(jarPath)) {
@@ -573,6 +683,7 @@ public class JarSpiderService implements DisposableBean, InitializingBean {
             } catch (Throwable ex) {
                 String msg = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getName();
                 lastError = className + " -> " + (msg.length() > 60 ? msg.substring(0, 60) : msg);
+                // 类名候选逐个试错是正常流程（Guard 壳类通常不存在），只记 debug，避免刷屏
                 DiagLog.step(log, "JAR className尝试失败: " + lastError);
             }
         }
@@ -655,27 +766,43 @@ public class JarSpiderService implements DisposableBean, InitializingBean {
                 Files.createDirectories(dexDir);
                 String token = md5(DEX_PATCH_VERSION + "|" + jarPath.toAbsolutePath() + "|" + Files.getLastModifiedTime(jarPath).toMillis());
                 Path outputJar = dexDir.resolve(token + ".jar");
-                if (Files.exists(outputJar)
-                        && Files.size(outputJar) > 0
-                        && jarContainsClass(outputJar, requiredClassName)) {
+                // 只有带完成标记的产物才可复用：dex2jar 中途失败会留下残缺 jar，
+                // 早期版本曾把它当成有效缓存，导致后续所有站点 ClassNotFoundException。
+                Path okMarker = dexDir.resolve(token + ".ok");
+                if (Files.exists(outputJar) && Files.size(outputJar) > 0
+                        && Files.exists(okMarker) && jarHasAnyClass(outputJar)) {
                     patchConvertedJarIfNeeded(outputJar);
                     return outputJar;
                 }
-                Files.deleteIfExists(outputJar);
+                Files.deleteIfExists(okMarker);
 
                 Path dexFile = extractPrimaryDex(jarPath);
+                Path tempJar = Files.createTempFile(dexDir, "dexconv-", ".jar");
+                boolean converted = false;
                 try {
-                    runDex2JarCommand(dexFile, outputJar);
+                    try {
+                        runDex2JarCommand(dexFile, tempJar);
+                    } finally {
+                        Files.deleteIfExists(dexFile);
+                    }
+                    if (!Files.exists(tempJar) || Files.size(tempJar) == 0) {
+                        throw new IllegalStateException("dex 转换后 jar 为空");
+                    }
+                    // 原子替换，避免并发读到半成品
+                    Files.move(tempJar, outputJar, StandardCopyOption.REPLACE_EXISTING);
+                    converted = true;
                 } finally {
-                    Files.deleteIfExists(dexFile);
+                    // 失败时不要残留临时文件（每次 2MB，会迅速堆积成几百 MB）
+                    if (!converted) {
+                        Files.deleteIfExists(tempJar);
+                    }
                 }
+                Files.writeString(okMarker, "ok");
 
-                if (!Files.exists(outputJar) || Files.size(outputJar) == 0) {
-                    throw new IllegalStateException("dex 转换后 jar 为空");
-                }
                 if (!jarContainsClass(outputJar, requiredClassName)) {
-                    Files.deleteIfExists(outputJar);
-                    throw new IllegalStateException("dex 转换结果缺少目标类: " + requiredClassName);
+                    // 仅记录：缺这个类名通常说明该站点用了别的候选类名，
+                    // 由后续 loadClass 逐个尝试即可，不销毁已生成的产物。
+                    DiagLog.step(log, "JAR dex 转换产物不含 " + requiredClassName + "，交由类名候选继续尝试");
                 }
                 patchConvertedJarIfNeeded(outputJar);
                 return outputJar;
@@ -683,6 +810,20 @@ public class JarSpiderService implements DisposableBean, InitializingBean {
                 throw new IllegalStateException("Spider JAR 为 Android dex 格式，本地转换失败: " + ex.getMessage() + "。可配置 app.dex2jar-command 或 app.spider-bridge-url", ex);
             }
         });
+    }
+
+    /** jar 内是否含有任意 class（不再要求特定类名）。 */
+    private boolean jarHasAnyClass(Path jarPath) {
+        try (JarFile jarFile = new JarFile(jarPath.toFile())) {
+            Enumeration<JarEntry> entries = jarFile.entries();
+            while (entries.hasMoreElements()) {
+                if (entries.nextElement().getName().endsWith(".class")) {
+                    return true;
+                }
+            }
+        } catch (Exception ignore) {
+        }
+        return false;
     }
 
     private Path ensureJvmCompatibleJar(Path jarPath) {
@@ -1369,8 +1510,28 @@ public class JarSpiderService implements DisposableBean, InitializingBean {
         }
     }
 
-    private void initSpiderIfPossible(Class<?> spiderClass, Object spider, SiteDefinition site) {
+    /**
+     * 取站点的 ext：若本地覆盖表为该 api 提供了明文 ext，则用它替换加密 ext。
+     *
+     * <p>加密 ext 的解密终点是 {@code DexNative.decrypt}（ftyguard_v7/v8.so，纯 ARM），
+     * 桌面 JVM 无法执行；有明文 ext 时代替掉即可让爬虫正常工作。
+     */
+    private String resolveExtText(SiteDefinition site) {
         String ext = site.getExtText();
+        if (extOverrideService == null || site.getApi() == null) {
+            return ext;
+        }
+        try {
+            String override = extOverrideService.resolve(site.getApi(), ext);
+            return override != null ? override : ext;
+        } catch (Throwable ex) {
+            log.warn("[Ext] 应用 ext 覆盖失败: {}", ex.getMessage());
+            return ext;
+        }
+    }
+
+    private void initSpiderIfPossible(Class<?> spiderClass, Object spider, SiteDefinition site) {
+        String ext = resolveExtText(site);
         if (spider instanceof Spider typedSpider) {
             try {
                 typedSpider.init(androidContext, ext);
@@ -1730,10 +1891,21 @@ public class JarSpiderService implements DisposableBean, InitializingBean {
     }
 
     private void patchConvertedJarIfNeeded(Path jarPath) {
+        // 补丁只做一次：patch 会以 zipfs 方式重写整个 jar 文件，
+        // 而该 jar 可能正被某个 ClassLoader 使用，重复重写会导致后续
+        // loadClass 抛 ClassNotFoundException / ClassFormatError。
+        Path marker = jarPath.resolveSibling(jarPath.getFileName() + ".patched");
+        if (Files.exists(marker)) {
+            return;
+        }
         try (java.nio.file.FileSystem jarFs = FileSystems.newFileSystem(URI.create("jar:" + jarPath.toUri()), Map.of())) {
             patchClassAccessFlags(jarFs.getPath("/com/github/catvod/spider/merge/A0/wk.class"));
             patchInterfaceBridgeMethods(jarFs.getPath("/com/google/protobuf/MessageOrBuilder.class"));
             patchInterfaceBridgeMethods(jarFs.getPath("/com/google/protobuf/MessageLiteOrBuilder.class"));
+        } catch (Exception ignore) {
+        }
+        try {
+            Files.writeString(marker, "ok");
         } catch (Exception ignore) {
         }
     }
@@ -2144,6 +2316,99 @@ public class JarSpiderService implements DisposableBean, InitializingBean {
         }
     }
 
+    /**
+     * fty 加固 jar 还原：这类 jar 的 classes.dex 只是加载壳，真正的爬虫代码在
+     * assets/ftyshinidie.guard 里 —— 那是一个被"点状打乱"的完整 JAR：
+     * 每个字节 b 若 ∈ {0x01,0x02,0x05,0x06} 则 b ^= 0x07（自逆，无密钥）。
+     * 命中该特征时，还原出内层 classes.dex 并重新打包成只含 dex 的 jar，
+     * 交给后续 dex2jar 流程；否则原样返回。
+     */
+    private Path ensureFtyUnguarded(Path jarPath) throws IOException {
+        // 并发保护：全站搜索会同时为多个站点解析同一个 jar，
+        // 若重复执行还原会不断重写产物（mtime 变化 → 下游 dex 转换缓存全部失效）。
+        String lockKey = jarPath.toAbsolutePath().toString();
+        Object lock = unguardLocks.computeIfAbsent(lockKey, k -> new Object());
+        synchronized (lock) {
+            try {
+                return doEnsureFtyUnguarded(jarPath);
+            } finally {
+                unguardLocks.remove(lockKey, lock);
+            }
+        }
+    }
+
+    private Path doEnsureFtyUnguarded(Path jarPath) throws IOException {
+        try (JarFile jarFile = new JarFile(jarPath.toFile())) {
+            JarEntry guardEntry = jarFile.getJarEntry("assets/ftyshinidie.guard");
+            if (guardEntry == null) {
+                return jarPath;
+            }
+
+            Path outDir = configService.getCacheDir().resolve("unguard-jars");
+            Files.createDirectories(outDir);
+            String token = md5("fty|" + jarPath.toAbsolutePath() + "|" + Files.size(jarPath)
+                    + "|" + Files.getLastModifiedTime(jarPath).toMillis());
+            Path outJar = outDir.resolve(token + ".jar");
+            if (Files.exists(outJar) && Files.size(outJar) > 0) {
+                try (JarFile cached = new JarFile(outJar.toFile())) {
+                    if (cached.getJarEntry("classes.dex") != null) {
+                        return outJar;
+                    }
+                }
+                Files.deleteIfExists(outJar);
+            }
+
+            byte[] raw;
+            try (InputStream in = jarFile.getInputStream(guardEntry)) {
+                raw = in.readAllBytes();
+            }
+            byte[] fixed = ftyDescramble(raw);
+
+            byte[] innerDex = null;
+            try (java.util.jar.JarInputStream jin = new java.util.jar.JarInputStream(new ByteArrayInputStream(fixed))) {
+                JarEntry entry;
+                while ((entry = jin.getNextJarEntry()) != null) {
+                    if ("classes.dex".equals(entry.getName())) {
+                        innerDex = jin.readAllBytes();
+                        break;
+                    }
+                }
+            }
+            if (innerDex == null || innerDex.length < 4
+                    || innerDex[0] != 'd' || innerDex[1] != 'e' || innerDex[2] != 'x') {
+                throw new IOException("fty guard 还原产物不是有效 dex");
+            }
+
+            Path tempJar = Files.createTempFile(outDir, "unguard-", ".jar");
+            boolean moved = false;
+            try {
+                try (JarOutputStream jout = new JarOutputStream(Files.newOutputStream(tempJar))) {
+                    jout.putNextEntry(new JarEntry("classes.dex"));
+                    jout.write(innerDex);
+                    jout.closeEntry();
+                }
+                Files.move(tempJar, outJar, StandardCopyOption.REPLACE_EXISTING);
+                moved = true;
+            } finally {
+                if (!moved) {
+                    Files.deleteIfExists(tempJar);
+                }
+            }
+            log.info("[JAR] fty guard 还原: {} → inner classes.dex {} bytes", jarPath.getFileName(), innerDex.length);
+            return outJar;
+        }
+    }
+
+    /** ftyguard 自逆还原：命中 {1,2,5,6} 的字节异或 7（加密与解密同一操作）。 */
+    private static byte[] ftyDescramble(byte[] data) {
+        byte[] out = new byte[data.length];
+        for (int i = 0; i < data.length; i++) {
+            byte b = data[i];
+            out[i] = (b == 1 || b == 2 || b == 5 || b == 6) ? (byte) (b ^ 0x07) : b;
+        }
+        return out;
+    }
+
     private JarSpec parseJarSpec(String jarSpec) {
         String spec = jarSpec == null ? "" : jarSpec.trim();
         String jarUrl = spec;
@@ -2259,7 +2524,15 @@ public class JarSpiderService implements DisposableBean, InitializingBean {
         return classLoaderMap.computeIfAbsent(jarPath.toString(), k -> {
             try {
                 URL url = jarPath.toUri().toURL();
-                ClassLoader parent = Thread.currentThread().getContextClassLoader();
+                // 父加载器必须固定为本应用的类加载器。
+                // 不能用 Thread.currentThread().getContextClassLoader()：全站搜索经
+                // CompletableFuture 派生线程执行，那时 contextClassLoader 是系统加载器，
+                // 看不到 BOOT-INF 里的 com.github.catvod.crawler.Spider，导致
+                // 所有 spider 都以 NoClassDefFoundError 失败。
+                ClassLoader parent = JarSpiderService.class.getClassLoader();
+                if (parent == null) {
+                    parent = ClassLoader.getSystemClassLoader();
+                }
                 // Parent-first for safety: JAR classes reference our stubs.
                 // Child-first for com.github.catvod.spider only if the class
                 // doesn't exist on parent (catches Init/Proxy overrides).
@@ -2310,6 +2583,12 @@ public class JarSpiderService implements DisposableBean, InitializingBean {
             throw new IllegalStateException("鍒濆鍖?Spider Init 澶辫触: " + ex.getMessage(), ex);
         }
 
+        // fty 加固包的内部 dex 用的是 InitOrigin（不是标准 Init）。
+        // 爬虫的 Context / SharedPreferences 都走它；不初始化会让
+        // InitOrigin.context() 返回 null → SharedPreferences NPE → init 静默失败，
+        // 表现为首页能用但详情/播放拿不到数据。
+        initStaticInitOriginIfPresent(loader);
+
         try {
             Class<?> proxyClass = loader.loadClass("com.github.catvod.spider.Proxy");
             Method proxyMethod = proxyClass.getMethod("proxy", Map.class);
@@ -2317,6 +2596,44 @@ public class JarSpiderService implements DisposableBean, InitializingBean {
         } catch (ClassNotFoundException ignore) {
         } catch (Throwable ex) {
             throw new IllegalStateException("鍔犺浇 Spider Proxy 澶辫触: " + ex.getMessage(), ex);
+        }
+
+        // 部分加固包自带本地代理（ProxyOrigin），端口字段未注入时生成的播放地址是
+        // http://127.0.0.1:-1/proxy?... → 必须注入应用真实端口才能走通 /proxy。
+        injectProxyOriginPort(loader);
+    }
+
+    private void injectProxyOriginPort(URLClassLoader loader) {
+        Integer port = parseServerPort();
+        if (port == null) {
+            return;
+        }
+        try {
+            Class<?> proxyOrigin = loader.loadClass("com.github.catvod.spider.ProxyOrigin");
+            for (java.lang.reflect.Field field : proxyOrigin.getDeclaredFields()) {
+                if (field.getType() != int.class || !Modifier.isStatic(field.getModifiers())) {
+                    continue;
+                }
+                if (!"yq".equals(field.getName())) {
+                    continue;
+                }
+                field.setAccessible(true);
+                field.setInt(null, port);
+                DiagLog.step(log, "JAR 已注入 ProxyOrigin 端口 " + port);
+                return;
+            }
+        } catch (ClassNotFoundException notFound) {
+            // 普通 jar 没有 ProxyOrigin，正常
+        } catch (Throwable ex) {
+            log.warn("[JAR] 注入 ProxyOrigin 端口失败: {}", ex.getMessage());
+        }
+    }
+
+    private Integer parseServerPort() {
+        try {
+            return Integer.parseInt(serverPort == null ? "" : serverPort.trim());
+        } catch (Exception ignore) {
+            return null;
         }
     }
 
@@ -2345,6 +2662,80 @@ public class JarSpiderService implements DisposableBean, InitializingBean {
             }
         }
         return false;
+    }
+
+    /**
+     * 初始化内层加固 dex 自带的 InitOrigin（等价于标准包的 Init）。
+     * 这类类的 init(Context) 会把 Context 存进静态字段，供 context()/getSpStr() 使用。
+     *
+     * <p>另外必须调用 {@code InitOrigin.setClass(...)} 注入一个含
+     * {@code decrypt(String)} 静态方法的类：内层爬虫的字符串解密走
+     * {@code Rc.KJ → InitOrigin.i.getDeclaredMethod("decrypt", String.class)}，
+     * i 为 null 时爬虫 init 会直接 NPE 失败（T4 / AppTT / App99 / AppSx 等）。
+     */
+    private void initStaticInitOriginIfPresent(URLClassLoader loader) {
+        try {
+            Class<?> initClass = loader.loadClass("com.github.catvod.spider.InitOrigin");
+            // ① 无论 init(Context) 是否成功，都要注入解密类：
+            //    InitOrigin.i 与 Context 是两个独立的静态字段，i 为 null 会让
+            //    内层爬虫的字符串解密直接 NPE（T4/AppTT/App99/AppSx 等）。
+            setDecryptClass(initClass);
+
+            // ② 再尝试 init(Context)，失败也只影响 context()/getSpStr() 这类能力
+            for (Method method : initClass.getMethods()) {
+                if (!"init".equals(method.getName()) || method.getParameterCount() != 1) {
+                    continue;
+                }
+                Class<?> paramType = method.getParameterTypes()[0];
+                List<Object> candidates = initContextCandidates(paramType);
+                // context() 返回 Application，优先传 Application 以免强转失败
+                java.util.Collections.reverse(candidates);
+                for (Object candidate : candidates) {
+                    try {
+                        method.invoke(null, candidate);
+                        DiagLog.step(log, "JAR 已初始化 InitOrigin");
+                        return;
+                    } catch (Exception ignore) {
+                    }
+                }
+            }
+            DiagLog.step(log, "JAR InitOrigin.init 未成功（不影响解密类注入）");
+        } catch (ClassNotFoundException notFound) {
+            // 普通 jar（无加固）没有 InitOrigin，正常
+        } catch (Throwable ex) {
+            log.warn("[JAR] 初始化 InitOrigin 失败: {}", ex.getMessage());
+        }
+    }
+
+    /**
+     * 把含 decrypt(String) 的类注入 InitOrigin.i，供内层爬虫解密字符串/ext。
+     *
+     * <p>加固包的 {@code Rc.KJ(String)} 会执行
+     * {@code InitOrigin.i.getDeclaredMethod("decrypt", String.class).invoke(null, str)}，
+     * 而 {@code C0049.m2191(ext)} 只是转发到 {@code Rc.KJ}，所以 ext 解密最终落到这里注入的类。
+     *
+     * <p>优先注入 {@link com.github.catvod.spider.DexNative}：它是加固包自身声明解密入口的类
+     * （签名完全匹配）。其真实实现位于 ftyguard_v7/v8.so（纯 ARM），桌面端只能给出
+     * 明确的 UnsatisfiedLinkError，而不是让 InitOrigin.i 为 null 导致 NPE。
+     */
+    private void setDecryptClass(Class<?> initClass) {
+        try {
+            Method setClass = null;
+            for (Method method : initClass.getMethods()) {
+                if ("setClass".equals(method.getName()) && method.getParameterCount() == 1
+                        && method.getParameterTypes()[0] == Class.class) {
+                    setClass = method;
+                    break;
+                }
+            }
+            if (setClass == null) {
+                return;
+            }
+            setClass.invoke(null, com.github.catvod.spider.DexNative.class);
+            DiagLog.step(log, "JAR 已注入 InitOrigin.i = DexNative");
+        } catch (Throwable ex) {
+            log.warn("[JAR] 注入 InitOrigin.setClass 失败: {}", ex.getMessage());
+        }
     }
 
     private List<Object> initContextCandidates(Class<?> parameterType) {
@@ -2590,6 +2981,7 @@ public class JarSpiderService implements DisposableBean, InitializingBean {
             connection.setConnectTimeout(10000);
             connection.setReadTimeout(30000);
             connection.setRequestProperty("User-Agent", "okhttp/3.15");
+            applyEncodedHeaders(connection, params.get("headers"));
             connection.connect();
 
             int status = connection.getResponseCode();
@@ -2600,10 +2992,101 @@ public class JarSpiderService implements DisposableBean, InitializingBean {
             if (!StringUtils.hasText(contentType)) {
                 contentType = "application/octet-stream";
             }
-            return new ProxyResponse(status, contentType, inputStream == null ? InputStream.nullInputStream() : inputStream);
+            byte[] body = inputStream == null ? new byte[0] : inputStream.readAllBytes();
+
+            // m3u8 播放列表需要把分片/密钥地址改写成走本代理，否则播放端会 404
+            String text = tryDecodeUtf8(body);
+            if (text != null && text.stripLeading().startsWith("#EXTM3U")) {
+                String rewritten = rewriteM3u8(text, target, params.get("headers"));
+                return new ProxyResponse(status, "application/vnd.apple.mpegurl",
+                        new ByteArrayInputStream(rewritten.getBytes(StandardCharsets.UTF_8)));
+            }
+            return new ProxyResponse(status, contentType, new ByteArrayInputStream(body));
         } catch (Exception ex) {
             throw new IllegalStateException("proxy passthrough 澶辫触: " + ex.getMessage(), ex);
         }
+    }
+
+    /** 解析爬虫传来的 headers 参数（Base64 编码的 "Key:Value" 串）并设置到请求。 */
+    private void applyEncodedHeaders(HttpURLConnection connection, String encoded) {
+        if (!StringUtils.hasText(encoded)) {
+            return;
+        }
+        try {
+            String decoded = new String(Base64.getDecoder().decode(encoded.trim()), StandardCharsets.UTF_8);
+            for (String part : decoded.split("[\\n\\r;]+")) {
+                int idx = part.indexOf(':');
+                if (idx > 0) {
+                    connection.setRequestProperty(part.substring(0, idx).trim(), part.substring(idx + 1).trim());
+                }
+            }
+        } catch (Exception ignore) {
+            // headers 不是合法的 base64，忽略
+        }
+    }
+
+    private String tryDecodeUtf8(byte[] body) {
+        if (body == null || body.length == 0 || body.length > 8 * 1024 * 1024) {
+            return null;
+        }
+        try {
+            java.nio.charset.CharsetDecoder decoder = StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT);
+            return decoder.decode(java.nio.ByteBuffer.wrap(body)).toString();
+        } catch (Exception ignore) {
+            return null;
+        }
+    }
+
+    /** 把 m3u8 里的分片、子播放列表、密钥地址改写为走本服务的 /proxy。 */
+    private String rewriteM3u8(String playlist, String baseUrl, String headersEncoded) {
+        String proxyBase = "http://127.0.0.1:" + serverPort + "/proxy?do=ts";
+        StringBuilder out = new StringBuilder(playlist.length() * 2);
+        for (String line : playlist.split("\r?\n")) {
+            String trimmed = line.trim();
+            if (trimmed.isEmpty()) {
+                out.append(line).append('\n');
+                continue;
+            }
+            if (trimmed.startsWith("#")) {
+                out.append(rewriteM3u8UriAttributes(line, baseUrl, proxyBase, headersEncoded)).append('\n');
+                continue;
+            }
+            out.append(toProxyUrl(trimmed, baseUrl, proxyBase, headersEncoded)).append('\n');
+        }
+        return out.toString();
+    }
+
+    /** 处理 #EXT-X-KEY / #EXT-X-MAP 等带 URI="..." 的标签。 */
+    private String rewriteM3u8UriAttributes(String line, String baseUrl, String proxyBase, String headersEncoded) {
+        if (!line.contains("URI=\"")) {
+            return line;
+        }
+        Matcher matcher = Pattern.compile("URI=\"([^\"]+)\"").matcher(line);
+        StringBuilder sb = new StringBuilder();
+        while (matcher.find()) {
+            String replaced = "URI=\"" + toProxyUrl(matcher.group(1), baseUrl, proxyBase, headersEncoded) + "\"";
+            matcher.appendReplacement(sb, Matcher.quoteReplacement(replaced));
+        }
+        matcher.appendTail(sb);
+        return sb.toString();
+    }
+
+    /** 把相对/绝对地址包装成本服务的代理地址。 */
+    private String toProxyUrl(String rawUrl, String baseUrl, String proxyBase, String headersEncoded) {
+        String absolute;
+        try {
+            absolute = URI.create(baseUrl).resolve(rawUrl).toString();
+        } catch (Exception ex) {
+            absolute = rawUrl;
+        }
+        StringBuilder proxy = new StringBuilder(proxyBase);
+        proxy.append("&url=").append(java.net.URLEncoder.encode(absolute, StandardCharsets.UTF_8));
+        if (StringUtils.hasText(headersEncoded)) {
+            proxy.append("&headers=").append(java.net.URLEncoder.encode(headersEncoded, StandardCharsets.UTF_8));
+        }
+        return proxy.toString();
     }
 
     private String firstNonBlank(String... values) {
@@ -2985,7 +3468,8 @@ public class JarSpiderService implements DisposableBean, InitializingBean {
             if (!StringUtils.hasText(json)) {
                 return objectMapper.createObjectNode();
             }
-            return objectMapper.readTree(json);
+            // 部分爬虫按 GBK 解码 UTF-8 响应，导致片名/简介乱码，这里精确还原
+            return MojibakeRepair.repair(objectMapper.readTree(json));
         } catch (Exception ex) {
             ObjectNode node = objectMapper.createObjectNode();
             node.put("raw", json);

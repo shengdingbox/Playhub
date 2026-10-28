@@ -16,7 +16,13 @@ spring:
 
 app:
   cache-dir: .cache/tvbox
-  spider-bridge-url: "http://localhost:18081"
+  # 首次启动自动创建的管理员账号（已存在则不会重置密码）
+  admin:
+    enabled: true
+    username: admin
+    password: playhub
+  # 兜底桥接到别的站（qist 配置），内容对不上，默认关闭；需要时填 http://127.0.0.1:18081
+  spider-bridge-url: ""
   node-command: "node"
   python-command: "C:\\Users\\Hurry\\AppData\\Roaming\\uv\\python\\cpython-3.14.4-windows-x86_64-none\\python.exe"
 
@@ -30,8 +36,9 @@ logging:
     path: .logs
 
 bridge:
-  port: 18081
-  spider-jar-url: "https://ghfast.top/raw.githubusercontent.com/qist/tvbox/master/xiaosa/spider.jar"
+  # 0 = 不启动内嵌桥接（不做跨站兜底）
+  port: 0
+  spider-jar-url: "https://gh-proxy.com/https://raw.githubusercontent.com/qist/tvbox/master/xiaosa/spider.jar"
   cache-dir: ".cache/tvbox"
   spider-operation-timeout-seconds: 25
   spider-operation-max-concurrency: 2

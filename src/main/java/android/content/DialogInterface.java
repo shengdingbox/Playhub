@@ -2,6 +2,16 @@ package android.content;
 
 public interface DialogInterface {
 
+    int BUTTON_POSITIVE = -1;
+    int BUTTON_NEGATIVE = -2;
+    int BUTTON_NEUTRAL = -3;
+
+    void cancel();
+
+    void dismiss();
+
+    void onClick(DialogInterface dialog, int which);
+
     interface OnClickListener {
         void onClick(DialogInterface dialog, int which);
     }
@@ -16,5 +26,9 @@ public interface DialogInterface {
 
     interface OnShowListener {
         void onShow(DialogInterface dialog);
+    }
+
+    interface OnMultiChoiceClickListener {
+        void onClick(DialogInterface dialog, int which, boolean isChecked);
     }
 }

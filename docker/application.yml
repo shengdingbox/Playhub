@@ -17,6 +17,7 @@ logging:
 
 app:
   cache-dir: ${APP_CACHE_DIR:/opt/playhub/data/cache}
+  # 跨站兜底默认关闭（内容来自别的站，与你配置的源对不上）
   spider-bridge-url: ${SPIDER_BRIDGE_URL:}
   node-command: ${NODE_COMMAND:node}
   python-command: ${PYTHON_COMMAND:python3}
@@ -29,3 +30,11 @@ app:
   script-max-concurrency: ${APP_SCRIPT_MAX_CONCURRENCY:2}
   script-admission-timeout-seconds: ${APP_SCRIPT_ADMISSION_TIMEOUT_SECONDS:3}
   dex2jar-command: ${DEX2JAR_COMMAND:__AUTO__}
+
+# 内嵌 spider 桥：把 csp_*Guard 加固爬虫映射到明文类执行（Guard 壳在桌面 JVM 无法运行）。
+# 设为 0 可关闭；关闭后 Guard 源只返回空结果。
+bridge:
+  port: ${APP_BRIDGE_PORT:0}
+  spider-jar-url: ${BRIDGE_SPIDER_JAR_URL:https://gh-proxy.com/https://raw.githubusercontent.com/qist/tvbox/master/xiaosa/spider.jar}
+  config-url: ${BRIDGE_CONFIG_URL:https://gh-proxy.com/https://raw.githubusercontent.com/qist/tvbox/master/xiaosa/api.json}
+  cache-dir: ${APP_CACHE_DIR:/opt/playhub/data/cache}

@@ -179,7 +179,7 @@ export default function DetailView() {
           isGroup: true,
           lineIndex,
         })
-        navigate(`/player?url=${encodeURIComponent(playUrl)}&title=${encodeURIComponent(groupDetail?.name || wallVideo?.name || '')}&ep=${encodeURIComponent(ep.name)}&source=${line.sourceUid}&vod=${wallVideo?.id || ''}&group=1&seek=${seekTime}`)
+        navigate(`/player?url=${encodeURIComponent(playUrl)}&title=${encodeURIComponent(groupDetail?.name || wallVideo?.name || '')}&ep=${encodeURIComponent(ep.name)}&source=${line.sourceUid}&vod=${wallVideo?.id || ''}&group=1&seek=${seekTime}&flag=${encodeURIComponent(line.groupName || '')}`)
       }).catch(() => message.error('获取播放地址失败'))
       .finally(() => setLoadingEpIdx(-1))
     },
@@ -207,7 +207,7 @@ export default function DetailView() {
             try { const cleaned = await cleanUrlWithAI(playUrl, store.settings); if (cleaned) playUrl = cleaned } catch {}
           }
           store.upsertHistory({ ...playback, lineIndex: groupIndex, url: playUrl })
-          navigate(`/player?url=${encodeURIComponent(playUrl)}&title=${encodeURIComponent(playback.title)}&ep=${encodeURIComponent(playback.episodeName)}&source=${d.sourceUid}&vod=${d.id}&seek=${seekTime}`)
+          navigate(`/player?url=${encodeURIComponent(playUrl)}&title=${encodeURIComponent(playback.title)}&ep=${encodeURIComponent(playback.episodeName)}&source=${d.sourceUid}&vod=${d.id}&seek=${seekTime}&flag=${encodeURIComponent(playback.flagName || group.flag || '')}`)
         }
       }).catch((err) => message.error('播放失败: ' + err.message))
       .finally(() => { setLoadingEpIdx(-1); if (isMainBtn) setAutoPlaying(false) })

@@ -57,9 +57,13 @@ public class ScriptSpiderService implements InitializingBean {
     @Value("${app.script-admission-timeout-seconds:3}")
     private long scriptAdmissionTimeoutSeconds;
 
+    private static final long DOWNLOAD_FAILURE_TTL_MS = 10 * 60 * 1000L;
+
     private volatile String resolvedNodeCommand;
     private volatile String resolvedPythonCommand;
     private Semaphore scriptSlots;
+    /** Negative cache: script URL → timestamp until which downloads are skipped. */
+    private final Map<String, Long> downloadFailures = new java.util.concurrent.ConcurrentHashMap<>();
 
     public ScriptSpiderService(AppPathsService appPathsService,
                                ConfigService configService,
@@ -241,18 +245,42 @@ public class ScriptSpiderService implements InitializingBean {
         if (Files.exists(target) && Files.size(target) > 0) {
             return;
         }
-        Files.createDirectories(target.getParent());
-        HttpRequest request = HttpRequest.newBuilder(URI.create(url))
-                .header("User-Agent", "okhttp/3.15")
-                .header("Accept", "*/*")
-                .timeout(Duration.ofSeconds(30))
-                .GET()
-                .build();
-        HttpResponse<byte[]> response = httpClient.send(request, HttpResponse.BodyHandlers.ofByteArray());
-        if (response.statusCode() < 200 || response.statusCode() >= 300) {
-            throw new IllegalStateException("script download failed, status=" + response.statusCode() + ", url=" + url);
+        Long failedUntil = downloadFailures.get(url);
+        if (failedUntil != null) {
+            if (System.currentTimeMillis() < failedUntil) {
+                throw new IllegalStateException("script download skipped (recently failed): " + url);
+            }
+            downloadFailures.remove(url);
         }
-        Files.write(target, response.body());
+        Files.createDirectories(target.getParent());
+
+        Exception lastError = null;
+        for (String candidate : GithubMirrorResolver.candidates(url)) {
+            try {
+                HttpRequest request = HttpRequest.newBuilder(URI.create(candidate))
+                        .header("User-Agent", "okhttp/3.15")
+                        .header("Accept", "*/*")
+                        .timeout(Duration.ofSeconds(12))
+                        .GET()
+                        .build();
+                HttpResponse<byte[]> response = httpClient.send(request, HttpResponse.BodyHandlers.ofByteArray());
+                if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                    throw new IllegalStateException("status=" + response.statusCode());
+                }
+                Files.write(target, response.body());
+                downloadFailures.remove(url);
+                return;
+            } catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
+                throw ex;
+            } catch (Exception ex) {
+                lastError = ex;
+            }
+        }
+        downloadFailures.put(url, System.currentTimeMillis() + DOWNLOAD_FAILURE_TTL_MS);
+        throw new IllegalStateException("script download failed: " + url
+                + " (" + (lastError == null ? "unknown" : lastError.getMessage()) + ")",
+                lastError);
     }
 
     private String runProcess(List<String> command, JsonNode payload) throws IOException, InterruptedException {

@@ -499,14 +499,59 @@ function requestWithNodeFallback(url, options = {}) {
   return JSON.parse(result.stdout || "{}");
 }
 
+// GitHub 镜像回退：配置里的脚本地址经常是 raw.githubusercontent.com 直连
+// 或 git.yylx.win / ghfast.top 等代理包装地址。原始地址失败时按序尝试镜像，
+// 最后试解包后的裸地址。非 GitHub 地址只会得到单元素列表（原地址本身）。
+const WRAPPED_GITHUB_RE =
+  /^https?:\/\/(?:git\.yylx\.win|ghfast\.top|mirror\.ghproxy\.com|gh-proxy\.com|ghproxy\.net|ghproxy\.com|hub\.fastgit\.xyz)\/(https?:\/\/\S+)$/i;
+const GITHUB_HOST_RE =
+  /^https?:\/\/(?:raw\.githubusercontent\.com|github\.com|gist\.githubusercontent\.com)\/\S+$/i;
+const GITHUB_MIRROR_PREFIXES = ["https://gh-proxy.com/", "https://ghfast.top/"];
+
+function mirrorCandidateUrls(url) {
+  const result = [];
+  const push = (u) => {
+    if (u && !result.includes(u)) result.push(u);
+  };
+  const wrapped = WRAPPED_GITHUB_RE.exec(url || "");
+  const inner = wrapped ? wrapped[1] : null;
+  if (inner) {
+    // 包装地址（git.yylx.win / ghfast.top 等代理常年在部分地区不可达）：
+    // 优先走镜像 + 裸地址，原始包装地址放最后，避免每次白等超时。
+    for (const prefix of GITHUB_MIRROR_PREFIXES) push(prefix + inner);
+    push(inner);
+    push(url);
+    return result;
+  }
+  push(url);
+  if (GITHUB_HOST_RE.test(url || "")) {
+    for (const prefix of GITHUB_MIRROR_PREFIXES) push(prefix + url);
+  }
+  return result;
+}
+
 function downloadRemoteText(url) {
+  let lastError = null;
+  for (const candidate of mirrorCandidateUrls(url)) {
+    try {
+      return downloadRemoteTextOnce(candidate);
+    } catch (error) {
+      lastError = error;
+      debugLog(`download failed via ${candidate}: ${error.message}`);
+    }
+  }
+  throw lastError;
+}
+
+function downloadRemoteTextOnce(url) {
   const curlBin = process.platform === "win32" ? "curl.exe" : "curl";
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "tvbox-module-"));
   const headerFile = path.join(tempDir, "headers.txt");
   const args = [
     "-sS",
+    "-f",
     "--max-time",
-    "30",
+    "12",
     "-L",
     "-D",
     headerFile,
@@ -537,13 +582,19 @@ function downloadRemoteText(url) {
     const headers = fs.existsSync(headerFile)
       ? parseHeaders(fs.readFileSync(headerFile, "utf8"))
       : {};
-    return decodeContent(result.stdout, headers);
+    const text = decodeContent(result.stdout, headers);
+    // 拦截镜像/代理返回的错误页（如 Cloudflare 522），避免污染磁盘缓存
+    const trimmed = text.trimStart().slice(0, 64).toLowerCase();
+    if (trimmed.startsWith("error code:") || trimmed.startsWith("<!doctype") || trimmed.startsWith("<html")) {
+      throw new Error(`non-JS content (error page) from ${url}`);
+    }
+    return text;
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 }
 
-const LOCALIZE_VERSION = "compat-20260423c";
+const LOCALIZE_VERSION = "compat-20261027a";
 const FROM_IMPORT_RE =
   /(^|[;\n])(\s*(?:import|export)\s*[^;]*?from\s*)(["'])([^"']+)\3/gm;
 const SIDE_EFFECT_IMPORT_RE =
@@ -708,7 +759,9 @@ const cheerioCandidate =
     : (cheerioNamespace?.default && typeof cheerioNamespace.default.load === "function")
       ? cheerioNamespace.default
       : globalThis.__tvboxCheerio;
-const cheerio = cheerioCandidate;
+// ESM 命名空间对象只读，而 drpy 入口会 monkey-patch（cheerio.jinja2 = ...）。
+// 摊平成普通可变对象，方法均为静态函数引用，不依赖 this。
+const cheerio = Object.assign({}, cheerioCandidate);
 globalThis.__tvboxCheerio = cheerio;
 globalThis.cheerio = cheerio;
 export default cheerio;
@@ -727,6 +780,35 @@ async function localizeImportSpecifier(specifier, sourceUrl, currentFile, state)
     specifier.startsWith("file:")
   ) {
     return specifier;
+  }
+
+  // drpy 的 assets:// 约定：相对引入方模块所在目录取资源。
+  // 例：assets://js/lib/cheerio.min.js → <sourceUrl 目录>/js/lib/cheerio.min.js
+  // 但有些镜像仓（如 fantaiying7/EXT）把资源平铺在根目录，
+  // 因此候选依次尝试：<目录>/js/lib/xxx.js → <目录>/xxx.js
+  if (/^assets:\/\//i.test(specifier)) {
+    const assetPath = specifier.replace(/^assets:\/\//i, "");
+    const canonical = new URL(assetPath, sourceUrl).toString();
+    const baseName = assetPath.split("/").pop();
+    const flattened = new URL(baseName, sourceUrl).toString();
+    // 平铺布局（fantaiying7/EXT 等镜像仓）优先：命中即 1s 内完成；
+    // 规范 js/lib 布局放后，避免每次先白等一轮 404/超时。
+    const variants = [...new Set([flattened, canonical])];
+    let lastError = null;
+    for (const candidate of variants) {
+      try {
+        const resolvedUrl = rewriteLegacyMirrorUrl(candidate);
+        let localPath = await localizeDependencyModule(resolvedUrl, state);
+        if (looksLikeCheerioModule(resolvedUrl)) {
+          localPath = ensureCheerioBridge(localPath, state);
+        }
+        return pathToImportSpecifier(currentFile, localPath);
+      } catch (error) {
+        lastError = error;
+        debugLog(`assets resolve failed via ${candidate}: ${error.message}`);
+      }
+    }
+    throw lastError;
   }
 
   const isRemote = /^https?:\/\//i.test(specifier);
@@ -885,7 +967,7 @@ console.log = debugLog;
 globalThis.log = debugLog;
 globalThis.print = debugLog;
 
-globalThis.req = (url, options = {}) => {
+const reqOnce = (url, options = {}) => {
   const curlBin = process.platform === "win32" ? "curl.exe" : "curl";
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "tvbox-js-"));
   const headerFile = path.join(tempDir, "headers.txt");
@@ -955,6 +1037,20 @@ globalThis.req = (url, options = {}) => {
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
+};
+
+globalThis.req = (url, options = {}) => {
+  const candidates = mirrorCandidateUrls(url);
+  let lastError = null;
+  for (const candidate of candidates) {
+    try {
+      return reqOnce(candidate, options);
+    } catch (error) {
+      lastError = error;
+      debugLog(`req failed via ${candidate}: ${error.message}`);
+    }
+  }
+  throw lastError;
 };
 
 globalThis.joinUrl = joinUrl;

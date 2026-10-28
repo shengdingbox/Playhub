@@ -13,11 +13,62 @@ const MAX_HISTORY = 120
 const MAX_SEARCH_HISTORY = 20
 const groupLinesCache = new Map()
 
+/**
+ * 播放记录的去重键。
+ *
+ * <p><b>一条记录 = 一条线路</b>：同一视频在不同站点/不同线路下各算一条，
+ * 因此键里带上 flagName（线路名）。这样换线路看同一部剧时，
+ * 每个线路各自保留自己的集数与进度，不会互相覆盖。
+ */
 function groupKey(entry) {
-  if (!entry.isGroup) return `${entry.sourceUid}::${entry.vodId}`
-  const sources = entry.sources || []
-  const sourceHash = sources.map((s) => s.uid || s.key || '').sort().join(',')
-  return `group::${entry.title}::${sourceHash}`
+  if (!entry) return ''
+  const flag = entry.flagName || entry.lineName || ''
+  if (entry.isGroup) {
+    const sources = entry.sources || []
+    const sourceHash = sources.map((s) => s.uid || s.key || '').sort().join(',')
+    return `group::${entry.title}::${sourceHash}::${flag}`
+  }
+  return `${entry.sourceUid}::${entry.vodId}::${flag}`
+}
+
+/**
+ * 把前端记录压成后端 DTO —— 只保留线路级字段，
+ * 不把整包 detail（含所有线路、剧集列表）写进库。
+ */
+function toRecordDto(entry) {
+  if (!entry) return null
+  return {
+    sourceUid: entry.sourceUid || '',
+    vodId: String(entry.vodId ?? ''),
+    title: entry.title || '',
+    poster: entry.poster || '',
+    flagName: entry.flagName || entry.lineName || '默认线路',
+    episodeIndex: Math.max(0, entry.episodeIndex ?? 0),
+    episodeName: entry.episodeName || '',
+    url: entry.url || '',
+    position: Math.max(0, Math.floor(entry.currentTime ?? 0)),
+    duration: Math.max(0, Math.floor(entry.duration ?? 0)),
+    updatedAt: entry.timestamp || Date.now(),
+  }
+}
+
+/** 后端记录 → 前端展示结构。 */
+function fromRecord(r) {
+  if (!r) return null
+  return {
+    id: r.id,
+    sourceUid: r.sourceUid,
+    vodId: r.vodId,
+    title: r.title,
+    poster: r.poster,
+    flagName: r.flagName,
+    episodeIndex: r.episodeIndex ?? 0,
+    episodeName: r.episodeName,
+    url: r.url,
+    currentTime: r.position ?? 0,
+    duration: r.duration ?? 0,
+    timestamp: r.updatedAt,
+  }
 }
 
 function configHistoryKey(url) {
@@ -116,6 +167,11 @@ ${validDetails.map((d, i) => `源${i + 1}: ${JSON.stringify({ name: d.name, desc
 }
 
 export const useStore = create((set, get) => ({
+  // 当前登录用户；null 表示未登录（App 的 AuthGate 会拦住整站）
+  user: null,
+  // 是否已完成一次登录态探测，避免首屏闪一下登录页
+  authReady: false,
+
   configUrl: '',
   config: null,
   configHistory: loadLS(CONFIG_HISTORY_KEY, []),
@@ -141,7 +197,12 @@ export const useStore = create((set, get) => ({
 
   currentPlayback: null,
 
-  history: loadLS(configHistoryKey(localStorage.getItem('playhub:configUrl') || ''), []),
+  // 观看记录以服务端 SQLite 为准（登录后加载），本地只做内存缓存
+  history: [],
+
+  // 片源库（管理员导入的全局片源）与本人勾选状态
+  sourceRows: [],
+  sourcesIsAdmin: false,
 
   liveGroups: [],
   liveChannels: [],
@@ -150,7 +211,7 @@ export const useStore = create((set, get) => ({
   liveSummary: null,
 
   settings: loadLS(SETTINGS_KEY, {
-    searchScope: 'all', liveSourceUrl: '', liveEpgUrl: '',
+    searchScope: 'all', searchSourceUids: [], liveSourceUrl: '', liveEpgUrl: '',
     aiEnabled: false, aiUrl: '', aiKey: '', aiModel: '',
   }),
 
@@ -163,18 +224,29 @@ export const useStore = create((set, get) => ({
   async bootstrap() {
     try {
       const settings = loadLS(SETTINGS_KEY, {
-        searchScope: 'all', liveSourceUrl: '', liveEpgUrl: '',
+        searchScope: 'all', searchSourceUids: [], liveSourceUrl: '', liveEpgUrl: '',
         aiEnabled: false, aiUrl: '', aiKey: '', aiModel: '',
       })
       const configUrl = localStorage.getItem('playhub:configUrl') || ''
       const selectedSourceUid = localStorage.getItem('playhub:selectedSourceUid') || ''
       set({ settings, configUrl, selectedSourceUid, bootstrapped: true })
+
+      // 先拿到片源库与本人勾选，后面的配置才按勾选过滤
+      await get().loadSources()
+
       if (configUrl) {
         try {
           await get().loadConfig(configUrl)
+          return
         } catch (err) {
           console.error('loadConfig error in bootstrap:', err)
         }
+      }
+      // 没有 configUrl（或加载失败）时，使用管理员导入的片源库
+      try {
+        await get().loadFromServer()
+      } catch (err) {
+        console.warn('loadFromServer failed:', err?.message)
       }
     } catch (err) {
       console.error('bootstrap error:', err)
@@ -182,37 +254,106 @@ export const useStore = create((set, get) => ({
     }
   },
 
+  /** 片源库列表 + 本人勾选状态。 */
+  async loadSources() {
+    try {
+      const res = await api.listSources()
+      set({ sourceRows: res?.sources || [], sourcesIsAdmin: !!res?.isAdmin })
+      return res
+    } catch (err) {
+      console.warn('loadSources failed:', err?.message)
+      return null
+    }
+  },
+
+  /** 保存本人勾选的片源；空数组表示全部启用。 */
+  async saveSourceSelection(sourceIds) {
+    await api.saveSourceSelection(sourceIds)
+    await get().loadSources()
+    await get().loadFromServer()
+  },
+
+  /** 管理员导入 TVBox 配置（JSON 文本或 URL）。 */
+  async importSources({ json, url }) {
+    const res = await api.importSources({ json, url })
+    await get().loadSources()
+    await get().loadFromServer()
+    return res
+  },
+
+  async deleteSource(id) {
+    await api.deleteSource(id)
+    await get().loadSources()
+    await get().loadFromServer()
+  },
+
+  async setSourceEnabled(id, enabled) {
+    await api.setSourceEnabled(id, enabled)
+    await get().loadSources()
+    await get().loadFromServer()
+  },
+
+  /** 直接用服务端的配置（configUrl 为空时即为片源库构建的配置）。 */
+  async loadFromServer() {
+    const cfg = await api.getConfig()
+    if (cfg && Array.isArray(cfg.sites)) {
+      get().applyConfig(cfg, get().configUrl || 'db://sources')
+    }
+  },
+
+  /**
+   * 把一份配置应用到界面状态。
+   *
+   * <p>若片源库里有勾选记录，只展示被勾选的片源；否则全部展示。
+   */
+  applyConfig(cfg, url) {
+    const allSites = cfg.sites || []
+    const rows = get().sourceRows || []
+    let sites = allSites
+    if (rows.length) {
+      const selectedUids = new Set(rows.filter((r) => r.selected).map((r) => r.uid))
+      if (selectedUids.size) {
+        const filtered = allSites.filter((s) => selectedUids.has(s.uid))
+        if (filtered.length) sites = filtered
+      }
+    }
+    sites = sites.filter((s) => s.searchable !== 0)
+    const classes = normalizeClasses(cfg)
+
+    const skipApis = new Set(['csp_Config', 'csp_LocalFile', 'csp_YGP', 'csp_Push', 'csp_Market', 'csp_Douban'])
+    const prevUid = get().selectedSourceUid
+    let selectedUid = ''
+    if (prevUid) {
+      const prev = sites.find((s) => s.uid === prevUid)
+      if (prev && !skipApis.has(prev.api)) selectedUid = prevUid
+    }
+    if (!selectedUid) {
+      const rec = sites.find((s) => s.searchable !== 0 && !skipApis.has(s.api)) || sites[0]
+      selectedUid = rec?.uid || ''
+    }
+
+    set({
+      config: cfg, sources: sites, selectedSourceUid: selectedUid,
+      classes: classes.length ? classes : get().classes,
+      activeClassId: '', searchCache: null, bootstrapped: true,
+    })
+    if (url && url.startsWith('http')) {
+      set({ configUrl: url })
+      localStorage.setItem('playhub:configUrl', url)
+      get().addConfigHistory(url)
+    }
+    localStorage.setItem('playhub:selectedSourceUid', selectedUid)
+    get().loadRecords()
+
+    if (selectedUid) get().loadHome().catch(() => {})
+  },
+
   async loadConfig(url) {
     set((s) => ({ loading: { ...s.loading, config: true } }))
     try {
       const res = await api.loadConfig(url)
       const cfg = res.config || res
-      const sites = (cfg.sites || []).filter((s) => s.searchable !== 0)
-      const classes = normalizeClasses(cfg)
-
-      const skipApis = new Set(['csp_Config', 'csp_LocalFile', 'csp_YGP', 'csp_Push', 'csp_Market', 'csp_Douban'])
-      const prevUid = get().selectedSourceUid
-      let selectedUid = ''
-      if (prevUid) {
-        const prev = sites.find((s) => s.uid === prevUid)
-        if (prev && !skipApis.has(prev.api)) selectedUid = prevUid
-      }
-      if (!selectedUid) {
-        const rec = sites.find((s) => s.searchable !== 0 && !skipApis.has(s.api)) || sites[0]
-        selectedUid = rec?.uid || ''
-      }
-
-      set({
-        configUrl: url, config: cfg, sources: sites, selectedSourceUid: selectedUid,
-        classes: classes.length ? classes : get().classes,
-        activeClassId: '', searchCache: null, bootstrapped: true,
-        history: loadLS(configHistoryKey(url), []),
-      })
-      localStorage.setItem('playhub:configUrl', url)
-      localStorage.setItem('playhub:selectedSourceUid', selectedUid)
-      get().addConfigHistory(url)
-
-      if (selectedUid) await get().loadHome()
+      get().applyConfig(cfg, url)
     } catch (err) {
       console.error('loadConfig error:', err)
       throw err
@@ -318,9 +459,19 @@ export const useStore = create((set, get) => ({
       loading: { ...get().loading, wall: true },
     })
 
-    const targetSources = scope === 'current'
-      ? [get().getSelectedSource()].filter(Boolean)
-      : get().sources.filter((s) => s.searchable !== 0)
+    // 搜索范围：all=全部可搜源 / current=当前源 / custom=用户勾选的部分源
+    const allSearchable = get().sources.filter((s) => s.searchable !== 0)
+    let targetSources
+    if (scope === 'current') {
+      targetSources = [get().getSelectedSource()].filter(Boolean)
+    } else if (scope === 'custom') {
+      const picked = new Set(settings.searchSourceUids || [])
+      targetSources = allSearchable.filter((s) => picked.has(s.uid))
+      // 勾选集为空时退化为全部源，避免搜索直接空转
+      if (targetSources.length === 0) targetSources = allSearchable
+    } else {
+      targetSources = allSearchable
+    }
 
     const total = targetSources.length
     set((s) => ({ searchProgress: { ...s.searchProgress, total } }))
@@ -329,7 +480,7 @@ export const useStore = create((set, get) => ({
       const controller = new AbortController()
       const timeout = setTimeout(() => controller.abort(), 5000)
       try {
-        const payload = await api.sourceSearch(src.uid, kw, false, { signal: controller.signal })
+        const payload = await api.sourceSearch(src.uid, kw, false, { signal: controller.signal, silent: true })
         clearTimeout(timeout)
         return normalizeList(payload).map((v) => normalizeVideoCard(v, src))
       } catch {
@@ -341,7 +492,7 @@ export const useStore = create((set, get) => ({
     // Use backend multi-threaded searchAll for AI mode
     if (useAI) {
       try {
-        const response = await api.searchAll(kw)
+        const response = await api.searchAll(kw, false, targetSources.map((s) => s.uid))
         const progressId = response.progressId
 
         if (progressId) {
@@ -365,7 +516,11 @@ export const useStore = create((set, get) => ({
             poll()
           })
 
-          const allCards = results.map((v) => normalizeVideoCard(v, { uid: v.source_uid || v.key, name: v.source_name || v.name }))
+          // 过滤桥接/爬虫返回的 {"error": "..."} 条目，避免显示成空卡片
+          const usable = (results || []).filter(
+            (v) => v && !v.error && (v.vod_name || v.name),
+          )
+          const allCards = usable.map((v) => normalizeVideoCard(v, { uid: v.source_uid || v.key, name: v.source_name || v.name }))
 
           set((s) => ({ searchProgress: { ...s.searchProgress, aiProcessing: true } }))
           const aiResult = await aiMergeVideos(allCards, settings, kw)
@@ -674,65 +829,152 @@ export const useStore = create((set, get) => ({
     return null
   },
 
-  upsertHistory(entry) {
-    const historyEntry = {
-      ...entry,
-      timestamp: Date.now(),
-      sources: entry.sources || undefined,
-      isGroup: entry.isGroup || undefined,
-      lineIndex: entry.lineIndex ?? 0,
-      episodeIndex: entry.episodeIndex ?? 0,
-      currentTime: entry.currentTime ?? 0,
+  // ── 账号与登录态 ──────────────────────────────────────
+  async fetchMe() {
+    try {
+      const res = await api.authMe()
+      if (res?.loggedIn) {
+        set({ user: { id: res.userId, username: res.username, role: res.role || 'user', isAdmin: !!res.isAdmin }, authReady: true })
+        await get().loadRecords()
+        get().migrateLocalHistory()
+      } else {
+        set({ user: null, authReady: true })
+      }
+    } catch {
+      set({ user: null, authReady: true })
     }
+  },
 
-    const key = groupKey(entry)
-    const list = get().history.filter((h) => groupKey(h) !== key)
-    list.unshift(historyEntry)
-    const trimmed = list.slice(0, MAX_HISTORY)
-    set({ history: trimmed })
-    saveLS(configHistoryKey(get().configUrl), trimmed)
+  async login(username, password) {
+    const res = await api.authLogin(username, password)
+    set({ user: { id: res.userId, username: res.username, role: res.role || 'user', isAdmin: !!res.isAdmin }, authReady: true })
+    await get().loadRecords()
+    get().migrateLocalHistory()
+    return res
+  },
+
+  async register(username, password) {
+    const res = await api.authRegister(username, password)
+    set({ user: { id: res.userId, username: res.username, role: res.role || 'user', isAdmin: !!res.isAdmin }, authReady: true })
+    await get().loadRecords()
+    get().migrateLocalHistory()
+    return res
+  },
+
+  async logout() {
+    try {
+      await api.authLogout()
+    } catch {}
+    set({ user: null, history: [] })
+    window.location.hash = '#/login'
+  },
+
+  /** 从服务端加载线路级观看记录（登录后调用）。 */
+  async loadRecords() {
+    if (!get().user) return
+    try {
+      const res = await api.listRecords(1000)
+      const list = (res?.records || []).map(fromRecord).filter(Boolean)
+      set({ history: list })
+    } catch (err) {
+      console.warn('loadRecords failed:', err?.message)
+    }
+  },
+
+  /**
+   * 首次登录时把浏览器 localStorage 里旧的观看记录一次性迁进该账号。
+   * 每个用户只迁一次（按 userId 打标记），迁移失败不写标记以便下次重试。
+   */
+  async migrateLocalHistory() {
+    const user = get().user
+    if (!user) return
+    const marker = `playhub:history-imported:${user.id}`
+    if (localStorage.getItem(marker)) return
+    try {
+      const legacy = loadLS(configHistoryKey(localStorage.getItem('playhub:configUrl') || ''), [])
+      if (Array.isArray(legacy) && legacy.length) {
+        const records = legacy.map(toRecordDto).filter((r) => r && r.sourceUid && r.vodId)
+        if (records.length) {
+          await api.importRecords(records)
+          await get().loadRecords()
+        }
+      }
+    } catch (err) {
+      console.warn('migrateLocalHistory failed:', err?.message)
+      return
+    }
+    localStorage.setItem(marker, '1')
+  },
+
+  // ── 观看记录（一条 = 一条线路）──────────────────────────
+  upsertHistory(entry) {
+    const dto = toRecordDto(entry)
+    if (!dto || !dto.sourceUid || !dto.vodId) return
+
+    const record = {
+      ...dto,
+      id: entry.id,
+      isGroup: entry.isGroup || undefined,
+      sources: entry.sources || undefined,
+      lineIndex: entry.lineIndex ?? 0,
+      timestamp: dto.updatedAt,
+    }
+    const key = groupKey(record)
+    const list = [record, ...get().history.filter((h) => groupKey(h) !== key)].slice(0, MAX_HISTORY)
+    set({ history: list })
+
+    // 异步落库，失败不影响播放
+    api.saveRecord(dto).catch(() => {})
   },
 
   updateHistoryEntry(patch) {
     const key = groupKey(patch)
-    const list = get().history.map((h) => {
-      if (groupKey(h) === key) {
-        return { ...h, ...patch, timestamp: Date.now() }
-      }
-      return h
-    })
+    const list = get().history.map((h) =>
+      groupKey(h) === key ? { ...h, ...patch, timestamp: Date.now() } : h
+    )
     set({ history: list })
-    saveLS(configHistoryKey(get().configUrl), list)
+    const updated = list.find((h) => groupKey(h) === key)
+    if (updated) api.saveRecord(toRecordDto(updated)).catch(() => {})
   },
 
-  updateHistoryTime(sourceUid, vodId, currentTime, isGroup, title) {
+  updateHistoryTime(sourceUid, vodId, currentTime, isGroup, title, flagName) {
+    let updated = null
     const list = get().history.map((h) => {
       let match = false
       if (isGroup && h.isGroup) {
-        match = h.title === title
+        match = h.title === title && (!flagName || h.flagName === flagName)
       } else if (!isGroup && !h.isGroup) {
-        match = h.sourceUid === sourceUid && h.vodId === vodId
+        match = h.sourceUid === sourceUid && h.vodId === String(vodId)
+          && (!flagName || h.flagName === flagName)
       }
       if (match) {
-        return { ...h, currentTime: Math.floor(currentTime), timestamp: Date.now() }
+        updated = { ...h, currentTime: Math.floor(currentTime), timestamp: Date.now() }
+        return updated
       }
       return h
     })
     set({ history: list })
-    saveLS(configHistoryKey(get().configUrl), list)
+    if (updated) api.saveRecord(toRecordDto(updated)).catch(() => {})
   },
 
-  getHistoryEntry(sourceUid, vodId, isGroup, title) {
+  getHistoryEntry(sourceUid, vodId, isGroup, title, flagName) {
     return get().history.find((h) => {
-      if (isGroup && h.isGroup) return h.title === title
-      if (!isGroup && !h.isGroup) return h.sourceUid === sourceUid && h.vodId === vodId
+      if (isGroup && h.isGroup) {
+        return h.title === title && (!flagName || h.flagName === flagName)
+      }
+      if (!isGroup && !h.isGroup) {
+        return h.sourceUid === sourceUid && h.vodId === String(vodId)
+          && (!flagName || h.flagName === flagName)
+      }
       return false
     })
   },
 
-  clearHistory() {
+  async clearHistory() {
     set({ history: [] })
-    saveLS(configHistoryKey(get().configUrl), [])
+    try {
+      await api.clearRecords()
+    } catch {}
   },
 
   async loadLiveData(playlistUrl, epgUrl) {

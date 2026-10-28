@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import com.tvbox.web.service.GithubMirrorResolver;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
@@ -38,14 +39,16 @@ public class BridgeServerConfig {
 
     private static final Logger log = LoggerFactory.getLogger(BridgeServerConfig.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
+    /** 桥接 JAR 转换产物目录（与主应用的 dex-jars 隔离，避免互相选中对方的产物）。 */
+    private static final String BRIDGE_JAR_DIR = "bridge-jars";
 
     @Value("${bridge.port:0}")
     private int port;
 
-    @Value("${bridge.spider-jar-url:https://ghfast.top/raw.githubusercontent.com/qist/tvbox/master/xiaosa/spider.jar}")
+    @Value("${bridge.spider-jar-url:https://gh-proxy.com/https://raw.githubusercontent.com/qist/tvbox/master/xiaosa/spider.jar}")
     private String jarUrl;
 
-    @Value("${bridge.config-url:https://ghfast.top/raw.githubusercontent.com/qist/tvbox/master/xiaosa/api.json}")
+    @Value("${bridge.config-url:https://gh-proxy.com/https://raw.githubusercontent.com/qist/tvbox/master/xiaosa/api.json}")
     private String configUrl;
 
     @Value("${bridge.cache-dir:.cache/tvbox}")
@@ -57,6 +60,9 @@ public class BridgeServerConfig {
     private final Map<String, Path> dexConvertedCache = new ConcurrentHashMap<>();
     private final Map<String, String> siteExtConfigs = new ConcurrentHashMap<>(); // api → ext
     private Path jarPath;
+    private volatile boolean ready;
+    private volatile String initError;
+    private final java.util.concurrent.atomic.AtomicBoolean initRunning = new java.util.concurrent.atomic.AtomicBoolean();
 
     // Guard → non-Guard mapping table
     private static final Map<String, String> GUARD_MAP = new LinkedHashMap<>();
@@ -102,56 +108,84 @@ public class BridgeServerConfig {
 
         Path cachePath = Path.of(cacheDir);
         Files.createDirectories(cachePath.resolve("jars"));
-        Files.createDirectories(cachePath.resolve("dex-jars"));
+        Files.createDirectories(cachePath.resolve(BRIDGE_JAR_DIR));
 
-        // Pre-download JAR
-        String hash = Base64.getUrlEncoder().withoutPadding().encodeToString(
-                MessageDigest.getInstance("MD5").digest(jarUrl.getBytes()));
-        jarPath = cachePath.resolve("jars").resolve(hash + ".jar");
-        if (!Files.exists(jarPath) || Files.size(jarPath) == 0) {
-            log.info("[Bridge] Downloading spider JAR: {}", jarUrl);
-            downloadFile(jarUrl, jarPath);
+        // Bind the HTTP endpoint first: callers then get a fast, explicit 503
+        // instead of a hung connection while the spider JAR downloads.
+        // Startup must never fail because a remote mirror is unreachable.
+        try {
+            server = HttpServer.create(new InetSocketAddress(port), 0);
+            server.setExecutor(Executors.newFixedThreadPool(4));
+            server.createContext("/spider/", this::handleSpider);
+            server.createContext("/health", this::handleHealth);
+            server.start();
+            log.info("[Bridge] Embedded spider bridge listening on port {} (initializing)", port);
+        } catch (Exception e) {
+            log.warn("[Bridge] Failed to bind port {}: {} — bridge disabled", port, e.getMessage());
+            server = null;
+            initError = "bind failed: " + e.getMessage();
+            return;
         }
-        log.info("[Bridge] Spider JAR ready: {} ({} bytes)", jarPath, Files.size(jarPath));
 
-        // Pre-load config 2 to get valid ext configs for mapped spiders
+        Thread initThread = new Thread(this::initializeHeavy, "bridge-init");
+        initThread.setDaemon(true);
+        initThread.start();
+    }
+
+    /** Heavy init (jar download + site ext configs) runs off the startup path. */
+    private void initializeHeavy() {
+        if (!initRunning.compareAndSet(false, true)) {
+            return;
+        }
+        try {
+            initError = null;
+            Path cachePath = Path.of(cacheDir);
+            try {
+                String hash = Base64.getUrlEncoder().withoutPadding().encodeToString(
+                        MessageDigest.getInstance("MD5").digest(jarUrl.getBytes()));
+                jarPath = cachePath.resolve("jars").resolve(hash + ".jar");
+                if (!Files.exists(jarPath) || Files.size(jarPath) == 0) {
+                    log.info("[Bridge] Downloading spider JAR: {}", jarUrl);
+                    downloadFile(jarUrl, jarPath);
+                }
+                log.info("[Bridge] Spider JAR ready: {} ({} bytes)", jarPath, Files.size(jarPath));
+            } catch (Exception e) {
+                initError = "spider jar unavailable: " + e.getMessage();
+                log.warn("[Bridge] {}", initError);
+                return;
+            }
+            loadSiteExtConfigs();
+            ready = true;
+            log.info("[Bridge] Initialization complete");
+        } finally {
+            initRunning.set(false);
+        }
+    }
+
+    /** Pre-load config 2 to get valid ext configs for mapped spiders. Non-fatal. */
+    private void loadSiteExtConfigs() {
         try {
             log.info("[Bridge] Loading site configs from: {}", configUrl);
-            HttpURLConnection conn = (HttpURLConnection) URI.create(configUrl).toURL().openConnection();
-            conn.setRequestMethod("GET");
-            conn.setConnectTimeout(30000);
-            conn.setReadTimeout(30000);
-            conn.setRequestProperty("User-Agent", "okhttp/3.15");
-            conn.connect();
-            if (conn.getResponseCode() >= 200 && conn.getResponseCode() < 300) {
-                byte[] cfgBytes = conn.getInputStream().readAllBytes();
-                JsonNode cfg = MAPPER.readTree(cfgBytes);
-                JsonNode sites = cfg.get("sites");
-                if (sites != null && sites.isArray()) {
-                    for (JsonNode s : sites) {
-                        String api = s.has("api") ? s.get("api").asText() : "";
-                        if (!api.isEmpty()) {
-                            String ext = "";
-                            if (s.has("ext") && !s.get("ext").isNull()) {
-                                JsonNode en = s.get("ext");
-                                ext = en.isTextual() ? en.asText() : en.toString();
-                            }
-                            siteExtConfigs.put(api, ext);
+            byte[] cfgBytes = fetchViaMirrors(configUrl, 10000, 30000);
+            JsonNode cfg = MAPPER.readTree(cfgBytes);
+            JsonNode sites = cfg.get("sites");
+            if (sites != null && sites.isArray()) {
+                for (JsonNode s : sites) {
+                    String api = s.has("api") ? s.get("api").asText() : "";
+                    if (!api.isEmpty()) {
+                        String ext = "";
+                        if (s.has("ext") && !s.get("ext").isNull()) {
+                            JsonNode en = s.get("ext");
+                            ext = en.isTextual() ? en.asText() : en.toString();
                         }
+                        siteExtConfigs.put(api, ext);
                     }
                 }
-                log.info("[Bridge] Loaded {} site ext configs", siteExtConfigs.size());
             }
+            log.info("[Bridge] Loaded {} site ext configs", siteExtConfigs.size());
         } catch (Exception e) {
             log.warn("[Bridge] Failed to load site configs: {}", e.getMessage());
         }
-
-        server = HttpServer.create(new InetSocketAddress(port), 0);
-        server.setExecutor(Executors.newFixedThreadPool(4));
-        server.createContext("/spider/", this::handleSpider);
-        server.createContext("/health", this::handleHealth);
-        server.start();
-        log.info("[Bridge] Started embedded spider bridge on port {}", port);
     }
 
     @PreDestroy
@@ -171,6 +205,17 @@ public class BridgeServerConfig {
         String action = path.substring(path.lastIndexOf('/') + 1);
 
         try {
+            if (!ready) {
+                // 上次初始化失败时，请求触发一次后台重试（网络可能已恢复）
+                if (initError != null) {
+                    Thread retry = new Thread(this::initializeHeavy, "bridge-init-retry");
+                    retry.setDaemon(true);
+                    retry.start();
+                }
+                String reason = initError != null ? initError : "initializing";
+                send(ex, 503, "{\"error\":\"bridge not ready: " + reason.replace("\"", "'") + "\"}");
+                return;
+            }
             byte[] bodyBytes = ex.getRequestBody().readAllBytes();
             JsonNode req = MAPPER.readTree(bodyBytes);
             JsonNode siteNode = req.get("site");
@@ -313,7 +358,7 @@ public class BridgeServerConfig {
             String msg = e.getMessage();
             if (msg == null && e.getCause() != null) msg = e.getCause().toString();
             if (msg == null) msg = e.getClass().getName();
-            log.warn("[Bridge] Spider execution failed for {}: {}", baseName, msg);
+            log.debug("[Bridge] Spider execution failed for {}: {}", baseName, msg);
             return "{\"error\":\"spider exec: " + (msg != null ? msg.replace("\"","'").substring(0, Math.min(msg.length(), 100)) : "unknown") + "\"}";
         }
 
@@ -486,7 +531,7 @@ public class BridgeServerConfig {
         }
 
         if (spiderClass == null) {
-            log.warn("[Bridge] Spider class not found: {}", className);
+            log.debug("[Bridge] Spider class not found: {}", className);
             return null;
         }
 
@@ -497,88 +542,73 @@ public class BridgeServerConfig {
     }
 
     private void downloadFile(String url, Path dest) throws IOException {
-        HttpURLConnection conn = (HttpURLConnection) URI.create(url).toURL().openConnection();
-        conn.setRequestMethod("GET");
-        conn.setConnectTimeout(30000);
-        conn.setReadTimeout(60000);
-        conn.setRequestProperty("User-Agent", "okhttp/3.15");
-        conn.connect();
-        int code = conn.getResponseCode();
-        if (code < 200 || code >= 300) {
-            throw new IOException("Download failed, status=" + code + " url=" + url);
-        }
         Files.createDirectories(dest.getParent());
-        try (InputStream in = conn.getInputStream()) {
-            Files.copy(in, dest, StandardCopyOption.REPLACE_EXISTING);
-        }
+        byte[] data = fetchViaMirrors(url, 10000, 60000);
+        Files.write(dest, data);
     }
 
     /**
-     * Find the best JAR to use: prefer pre-converted dex-jars or runtime-jars
-     * that already have usable .class files.
+     * Fetch a URL, trying GitHub mirror candidates (see GithubMirrorResolver)
+     * when the primary host is unreachable. Non-GitHub URLs get one attempt.
+     */
+    private byte[] fetchViaMirrors(String url, int connectTimeoutMs, int readTimeoutMs) throws IOException {
+        IOException lastError = null;
+        for (String candidate : GithubMirrorResolver.candidates(url)) {
+            try {
+                HttpURLConnection conn = (HttpURLConnection) URI.create(candidate).toURL().openConnection();
+                conn.setRequestMethod("GET");
+                conn.setConnectTimeout(connectTimeoutMs);
+                conn.setReadTimeout(readTimeoutMs);
+                conn.setRequestProperty("User-Agent", "okhttp/3.15");
+                conn.connect();
+                int code = conn.getResponseCode();
+                if (code < 200 || code >= 300) {
+                    throw new IOException("status=" + code);
+                }
+                try (InputStream in = conn.getInputStream()) {
+                    byte[] data = in.readAllBytes();
+                    log.info("[Bridge] Fetched {} bytes via {}", data.length, candidate);
+                    return data;
+                }
+            } catch (IOException e) {
+                log.debug("[Bridge] Fetch failed via {}: {}", candidate, e.getMessage());
+                lastError = e;
+            }
+        }
+        throw new IOException("Download failed: " + url
+                + (lastError != null ? " (" + lastError.getMessage() + ")" : ""), lastError);
+    }
+
+    /**
+     * 桥接只能使用它自己下载的 spider JAR（以及该 JAR 的转换产物）。
+     *
+     * <p>早期实现会跨目录挑选「最大的含 class 的 jar」，结果挑到了主应用为
+     * fty 加固包生成的内层 dex 产物 —— 那里没有 Czsapp/AppFox/AppGet 这类
+     * 明文爬虫类，于是桥接全部报 "Spider class not found"，兜底形同虚设。
      */
     private Path findBestJar(Path rawJar) throws Exception {
-        // Check if the raw JAR already has JVM-compatible .class files
-        try (JarFile jf = new JarFile(rawJar.toFile())) {
+        if (hasAnyClass(rawJar)) {
+            return rawJar;
+        }
+        // 已转换过则直接复用（转换产物放在独立的 bridge-jars 目录）
+        Path converted = bridgeConvertedPath(rawJar);
+        if (converted != null && Files.exists(converted) && hasAnyClass(converted)) {
+            return converted;
+        }
+        return ensureDexConverted(rawJar);
+    }
+
+    private boolean hasAnyClass(Path jarPath) {
+        try (JarFile jf = new JarFile(jarPath.toFile())) {
             Enumeration<JarEntry> e = jf.entries();
             while (e.hasMoreElements()) {
-                if (e.nextElement().getName().endsWith(".class")) return rawJar;
-            }
-        }
-
-        // PREFER runtime-jars (already JVM-compatible rewritten by main app)
-        Path runtimeDir = Path.of(cacheDir, "runtime-jars");
-        if (Files.exists(runtimeDir)) {
-            try (var ds = Files.newDirectoryStream(runtimeDir, "*.jar")) {
-                Path best = null; long bestSize = 0;
-                for (Path p : ds) {
-                    long sz = Files.size(p);
-                    if (sz > bestSize && sz > 50000) {
-                        try (JarFile jf = new JarFile(p.toFile())) {
-                            Enumeration<JarEntry> e2 = jf.entries();
-                            while (e2.hasMoreElements()) {
-                                if (e2.nextElement().getName().endsWith(".class")) {
-                                    best = p; bestSize = sz; break;
-                                }
-                            }
-                        }
-                    }
-                }
-                if (best != null) {
-                    log.info("[Bridge] Using runtime JAR: {}", best.getFileName());
-                    return best;
+                if (e.nextElement().getName().endsWith(".class")) {
+                    return true;
                 }
             }
+        } catch (Exception ignore) {
         }
-
-        // Look for pre-converted JARs in dex-jars directory
-        Path dexDir = Path.of(cacheDir, "dex-jars");
-        if (Files.exists(dexDir)) {
-            try (var ds = Files.newDirectoryStream(dexDir, "*.jar")) {
-                Path best = null;
-                long bestSize = 0;
-                for (Path p : ds) {
-                    long size = Files.size(p);
-                    // Pick the largest pre-converted JAR (most classes)
-                    if (size > bestSize && size > 50000) {
-                        // Verify it has class files
-                        try (JarFile jf = new JarFile(p.toFile())) {
-                            Enumeration<JarEntry> e2 = jf.entries();
-                            while (e2.hasMoreElements()) {
-                                if (e2.nextElement().getName().endsWith(".class")) {
-                                    best = p;
-                                    bestSize = size;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-                if (best != null) return best;
-            }
-        }
-
-        return rawJar;
+        return false;
     }
 
     private boolean isDexOnlyJar(Path p) throws Exception {
@@ -594,10 +624,22 @@ public class BridgeServerConfig {
         }
     }
 
+    /** 桥接自己的转换产物路径（与主应用的 dex-jars 完全隔离）。 */
+    private Path bridgeConvertedPath(Path p) {
+        try {
+            Path dexDir = Path.of(cacheDir, BRIDGE_JAR_DIR);
+            String token = Base64.getUrlEncoder().withoutPadding().encodeToString(
+                    MessageDigest.getInstance("MD5").digest((p.toString() + Files.getLastModifiedTime(p).toMillis()).getBytes()));
+            return dexDir.resolve(token + ".jar");
+        } catch (Exception ex) {
+            return null;
+        }
+    }
+
     private Path ensureDexConverted(Path p) {
         return dexConvertedCache.computeIfAbsent(p.toString(), k -> {
             try {
-                Path dexDir = Path.of(cacheDir, "dex-jars");
+                Path dexDir = Path.of(cacheDir, BRIDGE_JAR_DIR);
                 Files.createDirectories(dexDir);
                 String token = Base64.getUrlEncoder().withoutPadding().encodeToString(
                         MessageDigest.getInstance("MD5").digest((p.toString() + Files.getLastModifiedTime(p).toMillis()).getBytes()));

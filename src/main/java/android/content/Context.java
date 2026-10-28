@@ -54,6 +54,14 @@ public class Context {
         return dir;
     }
 
+    public File getDatabasePath(String name) {
+        File dir = baseDir().resolve(Path.of(".cache", "android-files", getPackageName(), "databases")).toFile();
+        if (!dir.exists()) {
+            dir.mkdirs();
+        }
+        return new File(dir, name);
+    }
+
     public File getCacheDir() {
         File dir = baseDir().resolve(Path.of(".cache", "android-cache", getPackageName())).toFile();
         if (!dir.exists()) {

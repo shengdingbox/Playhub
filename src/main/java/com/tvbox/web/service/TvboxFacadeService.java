@@ -125,7 +125,14 @@ public class TvboxFacadeService {
             DiagLog.step(log, "FAC home JAR结果不可用, 走category兜底", t0);
             ObjectNode fallbackHome = JsonNodeFactory.instance.objectNode();
             fallbackHome.set("class", defaultClasses());
+            // 兜底链有时限：慢源/异常源不应让一次首页请求拖到分钟级。
+            // 首次抛异常即视为该站点不可用（同类调用必然同样失败），直接跳出。
+            long fallbackDeadline = System.currentTimeMillis() + 8000L;
             for (String tid : List.of("1", "2", "3", "4", "5", "6")) {
+                if (System.currentTimeMillis() > fallbackDeadline) {
+                    DiagLog.step(log, "FAC home category兜底超时预算用尽, 停止重试", t0);
+                    break;
+                }
                 try {
                     JsonNode category = jarSpiderService.category(sessionId, site, tid, "1", true, Map.of());
                     List<JsonNode> list = extractList(category);
@@ -138,7 +145,9 @@ public class TvboxFacadeService {
                         DiagLog.step(log, "FAC home category兜底成功 tid=" + tid, t0);
                         return fallbackHome;
                     }
-                } catch (Throwable ignore) {
+                } catch (Throwable ex) {
+                    DiagLog.step(log, "FAC home category兜底异常 tid=" + tid + ": " + ex.getMessage(), t0);
+                    break;
                 }
             }
             // Final HTTP fallback for category too
@@ -174,8 +183,16 @@ public class TvboxFacadeService {
     }
 
     private boolean hasApiUrl(SiteDefinition site) {
-        return StringUtils.hasText(site.getApi())
-                && (site.getApi().startsWith("http://") || site.getApi().startsWith("https://"));
+        if (!StringUtils.hasText(site.getApi())) {
+            return false;
+        }
+        if (!site.getApi().startsWith("http://") && !site.getApi().startsWith("https://")) {
+            return false;
+        }
+        // 脚本源的 api 是 .js/.py 文件地址，不是 JSON 接口，HTTP 直连兜底没有意义
+        String lower = site.getApi().toLowerCase();
+        return !lower.endsWith(".js") && !lower.contains(".js?")
+                && !lower.endsWith(".py") && !lower.contains(".py?");
     }
 
     public JsonNode category(String key, String tid, String pg, boolean filter, Map<String, String> extend) {
@@ -237,12 +254,23 @@ public class TvboxFacadeService {
 
     public void searchAllBackground(String sessionId, String wd, boolean quick,
                                      ProgressTrackerService.ProgressInfo progress) {
+        searchAllBackground(sessionId, wd, quick, progress, null);
+    }
+
+    /**
+     * @param pickedUids 只搜索这些站点 uid；null 或空集合表示搜索全部可搜索源
+     */
+    public void searchAllBackground(String sessionId, String wd, boolean quick,
+                                     ProgressTrackerService.ProgressInfo progress,
+                                     java.util.Set<String> pickedUids) {
         long t0 = System.currentTimeMillis();
         DiagLog.step(log, "FAC searchAllBackground 多线程入口 wd=" + wd);
         ConfigPayload payload = getConfig(sessionId);
 
+        boolean filterByUid = pickedUids != null && !pickedUids.isEmpty();
         List<SiteDefinition> searchable = payload.getSites().stream()
                 .filter(s -> s != null && s.getSearchable() != 0)
+                .filter(s -> !filterByUid || pickedUids.contains(s.getUid()))
                 .toList();
 
         if (searchable.isEmpty()) {
@@ -290,14 +318,17 @@ public class TvboxFacadeService {
             }, executor));
         }
 
-        for (java.util.concurrent.CompletableFuture<Void> f : futures) {
-            try {
-                f.get(8, java.util.concurrent.TimeUnit.SECONDS);
-            } catch (Exception e) {
-                // timeout, skip
-            }
-        }
+        // 逐个 future 只等 8 秒会丢掉慢源的结果（首次搜索还要做 jar/dex 转换，
+        // 动辄 5-10 秒），这里改为等待线程池收敛：单源仍有 25 秒 spider 超时兜底，
+        // 整体再限一个总时长，保证结果收集完整。
         executor.shutdown();
+        try {
+            if (!executor.awaitTermination(90, java.util.concurrent.TimeUnit.SECONDS)) {
+                DiagLog.step(log, "FAC searchAllBackground 等待超时, 返回已收集结果", t0);
+            }
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        }
 
         int total = progress != null ? progress.getResults().size() : 0;
         DiagLog.step(log, "FAC searchAllBackground 完成 totalResults=" + total, t0);

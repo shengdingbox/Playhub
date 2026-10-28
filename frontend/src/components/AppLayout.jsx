@@ -1,10 +1,13 @@
 import React, { useEffect, useState } from 'react'
-import { Layout, Menu, Button, Drawer, Space, Typography, Badge } from 'antd'
+import { Layout, Menu, Button, Drawer, Space, Typography, Badge, Modal, Tag } from 'antd'
 import {
   HomeOutlined,
   HistoryOutlined,
   VideoCameraOutlined,
   SettingOutlined,
+  LogoutOutlined,
+  AppstoreOutlined,
+  UserOutlined,
   PlayCircleOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
@@ -20,6 +23,7 @@ const navItems = [
   { key: '/', icon: <HomeOutlined />, label: '首页' },
   { key: '/history', icon: <HistoryOutlined />, label: '历史' },
   { key: '/live', icon: <VideoCameraOutlined />, label: '直播' },
+  { key: '/sources', icon: <AppstoreOutlined />, label: '片源' },
 ]
 
 export default function AppLayout({ children }) {
@@ -27,6 +31,8 @@ export default function AppLayout({ children }) {
   const location = useLocation()
   const bootstrap = useStore((s) => s.bootstrap)
   const history = useStore((s) => s.history)
+  const user = useStore((s) => s.user)
+  const logout = useStore((s) => s.logout)
   const [collapsed, setCollapsed] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [mobile, setMobile] = useState(window.innerWidth < 768)
@@ -157,16 +163,62 @@ export default function AppLayout({ children }) {
                   </span>
                 )}
               </Button>
-              <Button
-                type="text"
-                icon={<SettingOutlined />}
-                block
-                onClick={() => setSettingsOpen(true)}
-                style={{ textAlign: collapsed ? 'center' : 'left' }}
-              >
-                {!collapsed && '设置'}
-              </Button>
+              {user?.isAdmin && (
+                <Button
+                  type="text"
+                  icon={<SettingOutlined />}
+                  block
+                  onClick={() => setSettingsOpen(true)}
+                  style={{ textAlign: collapsed ? 'center' : 'left' }}
+                >
+                  {!collapsed && '设置'}
+                </Button>
+              )}
+              {user && (
+                <Button
+                  type="text"
+                  icon={<LogoutOutlined />}
+                  block
+                  danger
+                  onClick={() => {
+                    Modal.confirm({
+                      title: '退出登录',
+                      content: `确定退出当前账号「${user.username || ''}」吗？`,
+                      okText: '退出',
+                      cancelText: '取消',
+                      onOk: () => logout(),
+                    })
+                  }}
+                  style={{ textAlign: collapsed ? 'center' : 'left' }}
+                >
+                  {!collapsed && '退出登录'}
+                </Button>
+              )}
             </Space>
+            {!collapsed && user && (
+              <div
+                style={{
+                  marginTop: 10,
+                  paddingTop: 10,
+                  borderTop: '1px dashed #f0f0f0',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  color: '#8c8c8c',
+                  fontSize: 12,
+                }}
+              >
+                <UserOutlined />
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {user.username}
+                </span>
+                {user.isAdmin && (
+                  <Tag color="gold" style={{ marginInlineStart: 'auto', marginInlineEnd: 0, fontSize: 10, lineHeight: '16px' }}>
+                    管理员
+                  </Tag>
+                )}
+              </div>
+            )}
           </div>
         </Sider>
       )}
@@ -204,7 +256,9 @@ export default function AppLayout({ children }) {
               <Text strong style={{ fontSize: 16 }}>PlayHub</Text>
             </Space>
             <Space>
-              <Button type="text" icon={<SettingOutlined />} onClick={() => setSettingsOpen(true)} />
+              {user?.isAdmin && (
+                <Button type="text" icon={<SettingOutlined />} onClick={() => setSettingsOpen(true)} />
+              )}
             </Space>
           </Header>
         )}

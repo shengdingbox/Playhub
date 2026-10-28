@@ -24,6 +24,8 @@ export default function PlayerView() {
   const source = params.get('source') || ''
   const vod = params.get('vod') || ''
   const isGroup = params.get('group') === '1'
+  // 线路名：观看记录按「一条线路一条记录」保存，这里必须带上
+  const flag = params.get('flag') || store.currentPlayback?.flagName || ''
   const seekTime = parseFloat(params.get('seek') || '0') || 0
 
   const [speedBoost, setSpeedBoost] = useState(false)
@@ -71,7 +73,7 @@ export default function PlayerView() {
     const saveTime = () => {
       const video = document.querySelector('video')
       if (video && video.currentTime > 0) {
-        store.updateHistoryTime(source, vod, video.currentTime, isGroup, title)
+        store.updateHistoryTime(source, vod, video.currentTime, isGroup, title, flag)
       }
     }
     saveTimerRef.current = setInterval(saveTime, 5000)
@@ -79,12 +81,12 @@ export default function PlayerView() {
       if (saveTimerRef.current) clearInterval(saveTimerRef.current)
       saveTime()
     }
-  }, [source, vod, isGroup, title])
+  }, [source, vod, isGroup, title, flag])
 
   const handleBack = useCallback(() => {
     const video = document.querySelector('video')
     if (video && video.currentTime > 0) {
-      store.updateHistoryTime(source, vod, video.currentTime, isGroup, title)
+      store.updateHistoryTime(source, vod, video.currentTime, isGroup, title, flag)
     }
     if (isGroup) {
       navigate(`/detail?source=${source}&vod=${vod}&group=1`)

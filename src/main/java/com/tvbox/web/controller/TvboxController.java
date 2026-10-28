@@ -42,6 +42,13 @@ public class TvboxController {
     @PostMapping("/config/load")
     public Map<String, Object> loadConfig(HttpSession session,
                                           @Valid @RequestBody LoadConfigRequest request) {
+        // 切换配置来源属于管理操作：普通用户只使用管理员导入的片源
+        if (!com.tvbox.web.config.AuthGuard.isAdmin(session)) {
+            Map<String, Object> denied = new LinkedHashMap<>();
+            denied.put("ok", false);
+            denied.put("message", "仅管理员可切换配置来源");
+            return denied;
+        }
         long t0 = System.currentTimeMillis();
         DiagLog.step(log, "CTL config/load 入口  url=" + request.getUrl());
         String sessionId = session.getId();
@@ -126,14 +133,17 @@ public class TvboxController {
     @GetMapping("/search/all")
     public JsonNode searchAll(HttpSession session,
                               @RequestParam String wd,
-                              @RequestParam(defaultValue = "false") boolean quick) {
+                              @RequestParam(defaultValue = "false") boolean quick,
+                              @RequestParam(required = false) String uids) {
         long t0 = System.currentTimeMillis();
-        DiagLog.step(log, "CTL searchAll 入口  wd=" + wd);
+        DiagLog.step(log, "CTL searchAll 入口  wd=" + wd + " uids=" + uids);
 
         String sessionId = session.getId();
         ConfigPayload payload = facadeService.getConfig(sessionId);
+        java.util.Set<String> picked = parseUids(uids);
         java.util.List<SiteDefinition> searchable = payload.getSites().stream()
                 .filter(s -> s != null && s.getSearchable() != 0)
+                .filter(s -> picked.isEmpty() || picked.contains(s.getUid()))
                 .toList();
 
         String progressId = progressTracker.createProgress(searchable.size());
@@ -141,7 +151,7 @@ public class TvboxController {
 
         // Process in background
         java.util.concurrent.CompletableFuture.runAsync(() -> {
-            facadeService.searchAllBackground(sessionId, wd, quick, progress);
+            facadeService.searchAllBackground(sessionId, wd, quick, progress, picked);
             if (progress != null) progress.setDone(true);
             DiagLog.step(log, "CTL searchAll 后台完成 progressId=" + progressId);
         });
@@ -150,6 +160,21 @@ public class TvboxController {
         response.put("progressId", progressId);
         DiagLog.step(log, "CTL searchAll 返回 progressId=" + progressId, t0);
         return response;
+    }
+
+    /** 解析逗号分隔的站点 uid 列表；空值表示不限（搜索全部源）。 */
+    private java.util.Set<String> parseUids(String uids) {
+        java.util.Set<String> picked = new java.util.LinkedHashSet<>();
+        if (uids == null || uids.isBlank()) {
+            return picked;
+        }
+        for (String part : uids.split(",")) {
+            String trimmed = part.trim();
+            if (!trimmed.isEmpty()) {
+                picked.add(trimmed);
+            }
+        }
+        return picked;
     }
 
     @GetMapping("/source/{key}/play")

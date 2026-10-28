@@ -1,5 +1,5 @@
-import React, { useState, useRef } from 'react'
-import { Form, Input, Button, Select, Space, Divider, Typography, message, List, Popconfirm, AutoComplete, Switch, Modal } from 'antd'
+import React, { useState, useRef, useMemo } from 'react'
+import { Form, Input, Button, Select, Space, Divider, Typography, message, List, Popconfirm, AutoComplete, Switch, Modal, Checkbox } from 'antd'
 import { DeleteOutlined, LinkOutlined, HistoryOutlined, ClockCircleOutlined, RobotOutlined, CheckCircleOutlined, CloseCircleOutlined, LoadingOutlined, ExportOutlined, ImportOutlined, LockOutlined } from '@ant-design/icons'
 import { useStore } from '../stores/useStore'
 
@@ -17,6 +17,12 @@ export default function SettingsDrawer({ onClose }) {
   const [importPassword, setImportPassword] = useState('')
   const [importData, setImportData] = useState('')
   const fileInputRef = useRef(null)
+
+  // 可搜索源列表（用于「自选源」多选）
+  const searchableSources = useMemo(
+    () => (store.sources || []).filter((s) => s.searchable !== 0),
+    [store.sources],
+  )
 
   const handleLoadConfig = async (url) => {
     const target = (url || configInput).trim()
@@ -214,9 +220,37 @@ export default function SettingsDrawer({ onClose }) {
             options={[
               { label: '全部源', value: 'all' },
               { label: '当前源', value: 'current' },
+              { label: '自选源（可多选）', value: 'custom' },
             ]}
           />
         </Form.Item>
+        {store.settings.searchScope === 'custom' && (
+          <Form.Item
+            label={`选择搜索源（已选 ${(store.settings.searchSourceUids || []).length} / ${searchableSources.length}）`}
+          >
+            <Space style={{ marginBottom: 8 }} wrap>
+              <Button size="small" onClick={() => store.updateSettings({ searchSourceUids: searchableSources.map((s) => s.uid) })}>
+                全选
+              </Button>
+              <Button size="small" onClick={() => store.updateSettings({ searchSourceUids: [] })}>
+                清空
+              </Button>
+            </Space>
+            {searchableSources.length === 0 ? (
+              <Text type="secondary" style={{ fontSize: 12 }}>当前配置没有可搜索的源</Text>
+            ) : (
+              <Checkbox.Group
+                style={{ display: 'flex', flexDirection: 'column', gap: 6 }}
+                value={store.settings.searchSourceUids || []}
+                onChange={(values) => store.updateSettings({ searchSourceUids: values })}
+                options={searchableSources.map((s) => ({ label: s.name || s.uid, value: s.uid }))}
+              />
+            )}
+            <Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 8 }}>
+              未勾选任何源时，将自动搜索全部源
+            </Text>
+          </Form.Item>
+        )}
       </Form>
 
       <Divider />

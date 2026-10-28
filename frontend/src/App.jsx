@@ -1,12 +1,16 @@
-import React from 'react'
+import React, { useEffect } from 'react'
 import { HashRouter, Routes, Route, useLocation } from 'react-router-dom'
 import { AnimatePresence } from 'framer-motion'
+import { Spin } from 'antd'
 import AppLayout from './components/AppLayout'
 import HomeView from './views/HomeView'
 import DetailView from './views/DetailView'
 import PlayerView from './views/PlayerView'
 import HistoryView from './views/HistoryView'
 import LiveView from './views/LiveView'
+import SourcesView from './views/SourcesView'
+import LoginView from './views/LoginView'
+import { useStore } from './stores/useStore'
 
 function AnimatedRoutes() {
   const location = useLocation()
@@ -18,17 +22,58 @@ function AnimatedRoutes() {
         <Route path="/player" element={<PlayerView />} />
         <Route path="/history" element={<HistoryView />} />
         <Route path="/live" element={<LiveView />} />
+        <Route path="/sources" element={<SourcesView />} />
+        {/* 未登录时 AuthGate 直接渲染登录页；这条路由用于手动访问 #/login */}
+        <Route path="/login" element={<LoginView />} />
       </Routes>
     </AnimatePresence>
   )
 }
 
+/**
+ * 登录门禁：未登录时整站只显示登录页，业务界面完全不渲染，
+ * 也就不会触发任何 /api 请求（后端对未登录的 /api 一律返回 401）。
+ */
+function AuthGate({ children }) {
+  const authReady = useStore((s) => s.authReady)
+  const user = useStore((s) => s.user)
+  const fetchMe = useStore((s) => s.fetchMe)
+
+  useEffect(() => {
+    fetchMe()
+  }, [fetchMe])
+
+  if (!authReady) {
+    return (
+      <div
+        style={{
+          minHeight: '100vh',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          background: '#f7f9fc',
+        }}
+      >
+        <Spin size="large" />
+      </div>
+    )
+  }
+
+  if (!user) {
+    return <LoginView />
+  }
+
+  return children
+}
+
 export default function App() {
   return (
     <HashRouter>
-      <AppLayout>
-        <AnimatedRoutes />
-      </AppLayout>
+      <AuthGate>
+        <AppLayout>
+          <AnimatedRoutes />
+        </AppLayout>
+      </AuthGate>
     </HashRouter>
   )
 }

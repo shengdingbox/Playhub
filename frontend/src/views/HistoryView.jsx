@@ -60,7 +60,7 @@ export default function HistoryView() {
             <HistoryOutlined />
             观看记录
           </Title>
-          <Text type="secondary">{history.length} 条记录</Text>
+          <Text type="secondary">{history.length} 条线路记录</Text>
         </div>
         {history.length > 0 && (
           <Popconfirm title="确定清空所有记录？" onConfirm={clearHistory} okText="确定" cancelText="取消">
@@ -143,6 +143,26 @@ export default function HistoryView() {
                   {entry.episodeName && (
                     <span className="remarks-badge">
                       {entry.episodeName}
+                    </span>
+                  )}
+                  {/* 线路名：一条记录对应一条线路，这里明确标出来 */}
+                  {entry.flagName && (
+                    <span style={{
+                      position: 'absolute',
+                      bottom: 8,
+                      left: 8,
+                      background: 'rgba(22, 119, 255, 0.9)',
+                      color: '#fff',
+                      padding: '2px 8px',
+                      borderRadius: 6,
+                      fontSize: 11,
+                      fontWeight: 500,
+                      maxWidth: 'calc(100% - 16px)',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}>
+                      {entry.flagName}
                     </span>
                   )}
                   {entry.isGroup && entry.sources?.length > 1 && (

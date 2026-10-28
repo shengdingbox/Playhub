@@ -1,8 +1,9 @@
 package android.app;
 
 import android.content.Context;
+import android.content.DialogInterface;
 
-public class Dialog {
+public class Dialog implements DialogInterface {
 
     protected final Context context;
 
@@ -20,7 +21,28 @@ public class Dialog {
     public void dismiss() {
     }
 
+    public void cancel() {
+    }
+
+    public void onClick(DialogInterface dialog, int which) {
+    }
+
     public boolean isShowing() {
         return false;
+    }
+
+    public void setCancelable(boolean cancelable) {
+    }
+
+    public void setCanceledOnTouchOutside(boolean cancel) {
+    }
+
+    public void setTitle(CharSequence title) {
+    }
+
+    public void setOnDismissListener(DialogInterface.OnDismissListener listener) {
+    }
+
+    public void setOnCancelListener(DialogInterface.OnCancelListener listener) {
     }
 }
