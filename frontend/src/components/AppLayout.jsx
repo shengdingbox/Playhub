@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react'
-import { Layout, Menu, Button, Drawer, Space, Typography, Badge, Modal, Tag } from 'antd'
+import React, { useEffect, useMemo, useState } from 'react'
+import { Layout, Menu, Button, Space, Typography, Badge, Modal, Tag } from 'antd'
 import {
   HomeOutlined,
   HistoryOutlined,
@@ -14,7 +14,6 @@ import {
 } from '@ant-design/icons'
 import { useNavigate, useLocation } from 'react-router-dom'
 import { useStore } from '../stores/useStore'
-import SettingsDrawer from './SettingsDrawer'
 
 const { Sider, Content, Header } = Layout
 const { Text } = Typography
@@ -23,7 +22,8 @@ const navItems = [
   { key: '/', icon: <HomeOutlined />, label: '首页' },
   { key: '/history', icon: <HistoryOutlined />, label: '历史' },
   { key: '/live', icon: <VideoCameraOutlined />, label: '直播' },
-  { key: '/sources', icon: <AppstoreOutlined />, label: '片源' },
+  // 片源库与设置都是管理员专属入口，普通用户不显示
+  { key: '/sources', icon: <AppstoreOutlined />, label: '片源', adminOnly: true },
 ]
 
 export default function AppLayout({ children }) {
@@ -32,9 +32,13 @@ export default function AppLayout({ children }) {
   const bootstrap = useStore((s) => s.bootstrap)
   const history = useStore((s) => s.history)
   const user = useStore((s) => s.user)
+  // 管理员专属入口（片源）对普通用户隐藏
+  const visibleNavItems = useMemo(
+    () => (user?.isAdmin ? navItems : navItems.filter((item) => !item.adminOnly)),
+    [user],
+  )
   const logout = useStore((s) => s.logout)
   const [collapsed, setCollapsed] = useState(false)
-  const [settingsOpen, setSettingsOpen] = useState(false)
   const [mobile, setMobile] = useState(window.innerWidth < 768)
   const [error, setError] = useState(null)
 
@@ -132,7 +136,7 @@ export default function AppLayout({ children }) {
             <Menu
               mode="inline"
               selectedKeys={[location.pathname]}
-              items={navItems}
+              items={visibleNavItems}
               onClick={({ key }) => navigate(key)}
               style={{ border: 'none', background: 'transparent' }}
             />
@@ -168,7 +172,7 @@ export default function AppLayout({ children }) {
                   type="text"
                   icon={<SettingOutlined />}
                   block
-                  onClick={() => setSettingsOpen(true)}
+                  onClick={() => navigate('/settings')}
                   style={{ textAlign: collapsed ? 'center' : 'left' }}
                 >
                   {!collapsed && '设置'}
@@ -257,7 +261,7 @@ export default function AppLayout({ children }) {
             </Space>
             <Space>
               {user?.isAdmin && (
-                <Button type="text" icon={<SettingOutlined />} onClick={() => setSettingsOpen(true)} />
+                <Button type="text" icon={<SettingOutlined />} onClick={() => navigate('/settings')} />
               )}
             </Space>
           </Header>
@@ -308,7 +312,7 @@ export default function AppLayout({ children }) {
               zIndex: 100,
             }}
           >
-            {navItems.map((item) => (
+            {visibleNavItems.map((item) => (
               <div
                 key={item.key}
                 onClick={() => navigate(item.key)}
@@ -332,16 +336,6 @@ export default function AppLayout({ children }) {
           </div>
         )}
       </Layout>
-
-      <Drawer
-        title="设置"
-        placement="right"
-        width={mobile ? '100%' : 480}
-        open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
-      >
-        <SettingsDrawer onClose={() => setSettingsOpen(false)} />
-      </Drawer>
     </Layout>
   )
 }

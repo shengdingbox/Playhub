@@ -115,8 +115,12 @@ export function clearRecords() {
   return client.delete('/api/records/all').then((r) => r.data)
 }
 // ── 片源库（全局共享，管理员导入 / 用户勾选）──────────────
-export function listSources() {
-  return getJson('/api/sources', { silent: true })
+export function listSources(kind) {
+  return getJson('/api/sources', { params: kind ? { kind } : {}, silent: true })
+}
+
+export function setSourceKind(id, kind) {
+  return client.patch(`/api/sources/${id}/kind`, { kind }, { silent: true }).then((r) => r.data)
 }
 
 export function saveSourceSelection(sourceIds) {

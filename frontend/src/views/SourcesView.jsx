@@ -1,8 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import {
-  Button, Card, Checkbox, Empty, Input, Modal, Popconfirm, Space, Table, Tabs, Tag, Typography, message,
+  Button, Card, Empty, Input, Modal, Popconfirm, Space, Table, Tabs, Tag, Typography, message,
 } from 'antd'
-import { CloudDownloadOutlined, DeleteOutlined, ImportOutlined, ReloadOutlined } from '@ant-design/icons'
+import {
+  CloudDownloadOutlined, DeleteOutlined, ImportOutlined, PlayCircleOutlined,
+  ReloadOutlined, VideoCameraOutlined,
+} from '@ant-design/icons'
 import { motion } from 'framer-motion'
 import { useStore } from '../stores/useStore'
 
@@ -15,64 +18,40 @@ const pageVariants = {
   exit: { opacity: 0, y: -8, transition: { duration: 0.2 } },
 }
 
-const TYPE_LABEL = {
-  0: 'XML',
-  1: 'JSON',
-  3: 'JAR',
-  4: '外链',
-}
+const TYPE_LABEL = { 0: 'XML', 1: 'JSON', 3: 'JAR', 4: '外链' }
 
 /**
- * 片源库页面。
+ * 片源库管理页（仅管理员）。
  *
- * <p>片源是全局共享的：管理员导入并维护，所有用户可见；
- * 每个用户在这里勾选自己要用的片源（选择存到账号）。
+ * <p>片源是管理员专属功能：在这里导入、分类、启用/停用、删除。
+ * 普通用户不接触本页，登录后直接使用启用中的片源。
+ *
+ * <p>按内容分为两类：<b>影视源</b>（vod）与<b>直播源</b>（live），
+ * 导入时按名称关键词自动归类，管理员也可手动调整。
  */
 export default function SourcesView() {
   const sourceRows = useStore((s) => s.sourceRows)
-  const isAdmin = useStore((s) => s.sourcesIsAdmin)
   const loadSources = useStore((s) => s.loadSources)
-  const saveSourceSelection = useStore((s) => s.saveSourceSelection)
   const importSources = useStore((s) => s.importSources)
   const deleteSource = useStore((s) => s.deleteSource)
   const setSourceEnabled = useStore((s) => s.setSourceEnabled)
+  const setSourceKind = useStore((s) => s.setSourceKind)
 
-  const [checkedIds, setCheckedIds] = useState([])
-  const [saving, setSaving] = useState(false)
+  const [kindTab, setKindTab] = useState('vod')
   const [importOpen, setImportOpen] = useState(false)
   const [importing, setImporting] = useState(false)
   const [importTab, setImportTab] = useState('json')
   const [jsonText, setJsonText] = useState('')
   const [configUrl, setConfigUrl] = useState('')
 
-  const syncChecked = useCallback((rows) => {
-    setCheckedIds(rows.filter((r) => r.selected).map((r) => r.id))
-  }, [])
-
   useEffect(() => {
-    loadSources().then((res) => {
-      if (res?.sources) syncChecked(res.sources)
-    })
-  }, [loadSources, syncChecked])
+    loadSources()
+  }, [loadSources])
 
-  const allChecked = useMemo(
-    () => sourceRows.length > 0 && checkedIds.length === sourceRows.length,
-    [sourceRows, checkedIds]
-  )
-
-  const handleSave = async () => {
-    setSaving(true)
-    try {
-      // 全选等价于「不限制」，传空数组即可（后端视为全部启用）
-      const ids = checkedIds.length === sourceRows.length ? [] : checkedIds
-      await saveSourceSelection(ids)
-      message.success('片源选择已保存')
-    } catch (err) {
-      message.error(err?.message || '保存失败')
-    } finally {
-      setSaving(false)
-    }
-  }
+  const vodRows = useMemo(() => sourceRows.filter((r) => r.kind !== 'live'), [sourceRows])
+  const liveRows = useMemo(() => sourceRows.filter((r) => r.kind === 'live'), [sourceRows])
+  const visibleRows = kindTab === 'live' ? liveRows : vodRows
+  const enabledCount = useMemo(() => sourceRows.filter((r) => r.enabled).length, [sourceRows])
 
   const handleImport = async () => {
     setImporting(true)
@@ -90,22 +69,20 @@ export default function SourcesView() {
     }
   }
 
-  const columns = [
-    {
-      title: '启用',
-      dataIndex: 'selected',
-      width: 64,
-      render: (_, row) => (
-        <Checkbox
-          checked={checkedIds.includes(row.id)}
-          onChange={(e) => {
-            setCheckedIds((prev) =>
-              e.target.checked ? [...new Set([...prev, row.id])] : prev.filter((x) => x !== row.id)
-            )
-          }}
-        />
-      ),
+  const toggleKind = useCallback(
+    async (row) => {
+      const next = row.kind === 'live' ? 'vod' : 'live'
+      try {
+        await setSourceKind(row.id, next)
+        message.success(`已改为${next === 'live' ? '直播源' : '影视源'}`)
+      } catch (err) {
+        message.error(err?.message || '修改分类失败')
+      }
     },
+    [setSourceKind]
+  )
+
+  const columns = [
     {
       title: '片源名称',
       dataIndex: 'name',
@@ -117,16 +94,16 @@ export default function SourcesView() {
         </Space>
       ),
     },
-    { title: 'api', dataIndex: 'api', ellipsis: true, width: 220 },
+    { title: 'api', dataIndex: 'api', ellipsis: true, width: 210 },
     {
       title: '类型',
       dataIndex: 'type',
-      width: 80,
+      width: 76,
       render: (t) => <Tag color="blue">{TYPE_LABEL[t] || `type ${t}`}</Tag>,
     },
     {
       title: '能力',
-      width: 150,
+      width: 140,
       render: (_, row) => (
         <Space size={4} wrap>
           {row.searchable ? <Tag color="green">搜索</Tag> : null}
@@ -135,19 +112,16 @@ export default function SourcesView() {
         </Space>
       ),
     },
-  ]
-
-  if (isAdmin) {
-    columns.push({
-      title: '管理',
-      width: 170,
+    {
+      title: '操作',
+      width: 250,
       render: (_, row) => (
-        <Space size={4}>
-          <Button
-            size="small"
-            onClick={() => setSourceEnabled(row.id, !row.enabled)}
-          >
+        <Space size={4} wrap>
+          <Button size="small" onClick={() => setSourceEnabled(row.id, !row.enabled)}>
             {row.enabled ? '停用' : '启用'}
+          </Button>
+          <Button size="small" onClick={() => toggleKind(row)}>
+            {row.kind === 'live' ? '设为影视源' : '设为直播源'}
           </Button>
           <Popconfirm
             title="删除该片源？"
@@ -159,8 +133,8 @@ export default function SourcesView() {
           </Popconfirm>
         </Space>
       ),
-    })
-  }
+    },
+  ]
 
   return (
     <motion.div
@@ -171,7 +145,7 @@ export default function SourcesView() {
       style={{ padding: 24, maxWidth: 1400, margin: '0 auto' }}
     >
       <Card
-        style={{ borderRadius: 20, marginBottom: 24, border: '1px solid #f0f0f0' }}
+        style={{ borderRadius: 20, marginBottom: 20, border: '1px solid #f0f0f0' }}
         styles={{ body: { padding: '24px 28px' } }}
       >
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
@@ -180,30 +154,17 @@ export default function SourcesView() {
               片源库
             </Title>
             <Text type="secondary">
-              共 {sourceRows.length} 个片源，已勾选 {checkedIds.length} 个
-              {isAdmin ? '（管理员可导入与维护）' : '（勾选后只使用选中的片源）'}
+              影视源 {vodRows.length} 个 · 直播源 {liveRows.length} 个 · 启用中 {enabledCount} 个
+              （仅管理员可维护，普通用户直接使用启用中的片源）
             </Text>
           </div>
           <Space wrap>
             <Button icon={<ReloadOutlined />} onClick={() => loadSources()}>
               刷新
             </Button>
-            <Button
-              onClick={() => {
-                const all = sourceRows.map((r) => r.id)
-                setCheckedIds(checkedIds.length === all.length ? [] : all)
-              }}
-            >
-              {allChecked ? '全部取消' : '全选'}
+            <Button type="primary" icon={<ImportOutlined />} onClick={() => setImportOpen(true)}>
+              导入 TVBox 配置
             </Button>
-            <Button type="primary" loading={saving} onClick={handleSave}>
-              保存我的选择
-            </Button>
-            {isAdmin && (
-              <Button type="primary" icon={<ImportOutlined />} onClick={() => setImportOpen(true)}>
-                导入 TVBox 配置
-              </Button>
-            )}
           </Space>
         </div>
       </Card>
@@ -215,21 +176,56 @@ export default function SourcesView() {
               片源库还是空的
               <br />
               <Text type="secondary" style={{ fontSize: 13 }}>
-                {isAdmin ? '点右上角「导入 TVBox 配置」，粘贴 JSON 或填配置地址' : '请联系管理员导入片源'}
+                点右上角「导入 TVBox 配置」，粘贴 JSON 或填配置地址
               </Text>
             </span>
           }
           style={{ padding: '80px 0' }}
-        />
+        >
+          <Button type="primary" icon={<ImportOutlined />} onClick={() => setImportOpen(true)}>
+            导入片源
+          </Button>
+        </Empty>
       ) : (
-        <Card style={{ borderRadius: 20, border: '1px solid #f0f0f0' }} styles={{ body: { padding: 8 } }}>
-          <Table
-            rowKey="id"
-            size="middle"
-            columns={columns}
-            dataSource={sourceRows}
-            pagination={{ pageSize: 20, showSizeChanger: true }}
+        <Card style={{ borderRadius: 20, border: '1px solid #f0f0f0' }} styles={{ body: { padding: '8px 8px 16px' } }}>
+          <Tabs
+            activeKey={kindTab}
+            onChange={setKindTab}
+            style={{ paddingInline: 12 }}
+            items={[
+              {
+                key: 'vod',
+                label: (
+                  <Space size={6}>
+                    <PlayCircleOutlined />
+                    影视源
+                    <Tag color="green">{vodRows.length}</Tag>
+                  </Space>
+                ),
+              },
+              {
+                key: 'live',
+                label: (
+                  <Space size={6}>
+                    <VideoCameraOutlined />
+                    直播源
+                    <Tag color="orange">{liveRows.length}</Tag>
+                  </Space>
+                ),
+              },
+            ]}
           />
+          {visibleRows.length === 0 ? (
+            <Empty description={kindTab === 'live' ? '暂无直播源' : '暂无影视源'} style={{ padding: '60px 0' }} />
+          ) : (
+            <Table
+              rowKey="id"
+              size="middle"
+              columns={columns}
+              dataSource={visibleRows}
+              pagination={{ pageSize: 20, showSizeChanger: true }}
+            />
+          )}
         </Card>
       )}
 
@@ -244,8 +240,8 @@ export default function SourcesView() {
         width={720}
       >
         <Paragraph type="secondary" style={{ fontSize: 13 }}>
-          导入会把配置里的 <Text code>sites</Text> 逐条解析进片源库；
-          同样的片源重复导入只会更新，不会重复。
+          导入会把配置里的 <Text code>sites</Text> 逐条解析进片源库，并按名称自动区分
+          <Text strong>影视源</Text> / <Text strong>直播源</Text>；相同的片源重复导入只会更新。
         </Paragraph>
         <Tabs
           activeKey={importTab}

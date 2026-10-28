@@ -231,10 +231,13 @@ export const useStore = create((set, get) => ({
       const selectedSourceUid = localStorage.getItem('playhub:selectedSourceUid') || ''
       set({ settings, configUrl, selectedSourceUid, bootstrapped: true })
 
-      // 先拿到片源库与本人勾选，后面的配置才按勾选过滤
-      await get().loadSources()
+      // 片源库是管理员专属功能：普通用户不拉取，直接使用管理员配置的启用片源
+      if (get().user?.isAdmin) {
+        await get().loadSources()
+      }
 
-      if (configUrl) {
+      // 只有管理员才可能还用着历史配置地址；普通用户一律使用服务端片源库
+      if (configUrl && get().user?.isAdmin) {
         try {
           await get().loadConfig(configUrl)
           return
@@ -242,7 +245,7 @@ export const useStore = create((set, get) => ({
           console.error('loadConfig error in bootstrap:', err)
         }
       }
-      // 没有 configUrl（或加载失败）时，使用管理员导入的片源库
+      // 使用管理员导入的片源库（普通用户唯一的配置来源）
       try {
         await get().loadFromServer()
       } catch (err) {
@@ -291,6 +294,12 @@ export const useStore = create((set, get) => ({
     await api.setSourceEnabled(id, enabled)
     await get().loadSources()
     await get().loadFromServer()
+  },
+
+  /** 管理员调整片源分类（影视源 / 直播源）。 */
+  async setSourceKind(id, kind) {
+    await api.setSourceKind(id, kind)
+    await get().loadSources()
   },
 
   /** 直接用服务端的配置（configUrl 为空时即为片源库构建的配置）。 */
@@ -352,6 +361,10 @@ export const useStore = create((set, get) => ({
     set((s) => ({ loading: { ...s.loading, config: true } }))
     try {
       const res = await api.loadConfig(url)
+      // 后端对非管理员返回 ok:false，这里必须拦下，否则会拿空配置把界面清空
+      if (res && res.ok === false) {
+        throw new Error(res.message || '配置加载失败')
+      }
       const cfg = res.config || res
       get().applyConfig(cfg, url)
     } catch (err) {

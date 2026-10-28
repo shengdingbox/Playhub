@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { Button, Typography } from 'antd'
-import { ArrowLeftOutlined, InfoCircleOutlined } from '@ant-design/icons'
+import { Button, Modal, Space, Tag, Typography, message } from 'antd'
+import { ArrowLeftOutlined, ExportOutlined, InfoCircleOutlined } from '@ant-design/icons'
 import { motion } from 'framer-motion'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import PlyrPlayer from '../components/PlyrPlayer'
+import { buildPlayerOptions, copyText, toAbsoluteUrl } from '../utils/externalPlayer'
 import { useStore } from '../stores/useStore'
 
 const { Text } = Typography
@@ -29,6 +30,8 @@ export default function PlayerView() {
   const seekTime = parseFloat(params.get('seek') || '0') || 0
 
   const [speedBoost, setSpeedBoost] = useState(false)
+  const [externalOpen, setExternalOpen] = useState(false)
+  const [playerOptions, setPlayerOptions] = useState([])
   const [playerKey, setPlayerKey] = useState(0)
   const longPressTimer = useRef(null)
   const saveTimerRef = useRef(null)
@@ -156,6 +159,19 @@ export default function PlayerView() {
           <Text style={{ color: '#fff', fontSize: 15, fontWeight: 500 }}>{title}</Text>
           {episode && <Text style={{ color: 'rgba(255,255,255,0.7)', fontSize: 13, marginLeft: 8 }}>{episode}</Text>}
         </div>
+        {videoUrl && (
+          <Button
+            type="text"
+            icon={<ExportOutlined />}
+            onClick={() => {
+              setPlayerOptions(buildPlayerOptions(videoUrl))
+              setExternalOpen(true)
+            }}
+            style={{ color: 'rgba(255,255,255,0.7)' }}
+          >
+            外部播放器
+          </Button>
+        )}
         {source && vod && (
           <Button type="text" icon={<InfoCircleOutlined />} onClick={handleBack} style={{ color: 'rgba(255,255,255,0.7)' }}>
             详情
@@ -205,6 +221,53 @@ export default function PlayerView() {
           长按屏幕加速播放 · 空格键暂停/播放
         </Text>
       </div>
+
+      <Modal
+        title="用外部播放器打开"
+        open={externalOpen}
+        onCancel={() => setExternalOpen(false)}
+        footer={null}
+        width={480}
+      >
+        <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 12 }}>
+          需要手机上已安装对应播放器；若点击无反应，说明该播放器未安装或系统不支持该跳转。
+        </Text>
+        <Space direction="vertical" style={{ width: '100%' }} size={8}>
+          {playerOptions.map((opt) => (
+            <Button
+              key={opt.key}
+              block
+              size="large"
+              style={{ textAlign: 'left', height: 'auto', padding: '10px 16px' }}
+              onClick={() => {
+                setExternalOpen(false)
+                window.location.href = opt.href
+              }}
+            >
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}>
+                <span style={{ fontWeight: 600 }}>{opt.name}</span>
+                <span style={{ fontSize: 12, color: '#8c8c8c', fontWeight: 400 }}>{opt.hint}</span>
+              </div>
+            </Button>
+          ))}
+          <Button
+            block
+            onClick={async () => {
+              const ok = await copyText(toAbsoluteUrl(videoUrl))
+              if (ok) {
+                message.success('播放地址已复制，可粘贴到任意播放器')
+              } else {
+                message.warning('复制失败，请手动长按选择地址')
+              }
+            }}
+          >
+            复制播放地址
+          </Button>
+        </Space>
+        <div style={{ marginTop: 12, fontSize: 12, color: '#8c8c8c', wordBreak: 'break-all' }}>
+          {toAbsoluteUrl(videoUrl)}
+        </div>
+      </Modal>
     </motion.div>
   )
 }

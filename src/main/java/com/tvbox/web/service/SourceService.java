@@ -36,6 +36,11 @@ public class SourceService {
 
     private static final Logger log = LoggerFactory.getLogger(SourceService.class);
 
+    /** 片源分类：影视源。 */
+    public static final String KIND_VOD = "vod";
+    /** 片源分类：直播源。 */
+    public static final String KIND_LIVE = "live";
+
     private final DatabaseService db;
     private final ObjectMapper mapper = new ObjectMapper();
 
@@ -50,6 +55,7 @@ public class SourceService {
             String api,
             String name,
             int type,
+            String kind,
             String ext,
             String jar,
             String sourceKey,
@@ -132,6 +138,8 @@ public class SourceService {
 
     private void upsert(Connection conn, String uid, SiteDefinition site, int order,
                         long now, boolean exists) throws SQLException {
+        // 已存在的记录沿用原分类（管理员手动改过的不被覆盖）
+        String existingKind = exists ? existingKindOf(conn, uid) : null;
         String categories = null;
         try {
             if (site.getCategories() != null && !site.getCategories().isEmpty()) {
@@ -144,86 +152,152 @@ public class SourceService {
 
         if (exists) {
             String sql = """
-                    UPDATE sources SET api=?, name=?, type=?, ext=?, jar=?, source_key=?,
+                    UPDATE sources SET api=?, name=?, type=?, kind=?, ext=?, jar=?, source_key=?,
                         play_url=?, categories=?, searchable=?, quick_search=?, filterable=?,
                         sort_order=?, updated_at=?
                      WHERE uid=?
                     """;
             try (PreparedStatement ps = conn.prepareStatement(sql)) {
-                bindSite(ps, site, ext, categories, order, now);
-                ps.setString(13, uid);
+                bindSite(ps, site, ext, categories, order, now, existingKind);
+                ps.setString(14, uid);
                 ps.executeUpdate();
             }
         } else {
             String sql = """
                     INSERT INTO sources
-                        (uid, api, name, type, ext, jar, source_key, play_url, categories,
+                        (uid, api, name, type, kind, ext, jar, source_key, play_url, categories,
                          searchable, quick_search, filterable, sort_order, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """;
             try (PreparedStatement ps = conn.prepareStatement(sql)) {
                 ps.setString(1, uid);
                 ps.setString(2, site.getApi());
                 ps.setString(3, site.getName());
                 ps.setInt(4, site.getType());
-                ps.setString(5, ext);
-                ps.setString(6, site.getJar());
-                ps.setString(7, site.getKey());
-                ps.setString(8, site.getPlayUrl());
-                ps.setString(9, categories);
-                ps.setInt(10, site.getSearchable());
-                ps.setInt(11, site.getQuickSearch());
-                ps.setInt(12, site.getFilterable());
-                ps.setInt(13, order);
-                ps.setLong(14, now);
+                ps.setString(5, inferKind(site.getName(), site.getApi(), null));
+                ps.setString(6, ext);
+                ps.setString(7, site.getJar());
+                ps.setString(8, site.getKey());
+                ps.setString(9, site.getPlayUrl());
+                ps.setString(10, categories);
+                ps.setInt(11, site.getSearchable());
+                ps.setInt(12, site.getQuickSearch());
+                ps.setInt(13, site.getFilterable());
+                ps.setInt(14, order);
                 ps.setLong(15, now);
+                ps.setLong(16, now);
                 ps.executeUpdate();
             }
         }
     }
 
     private void bindSite(PreparedStatement ps, SiteDefinition site, String ext,
-                          String categories, int order, long now) throws SQLException {
+                          String categories, int order, long now, String existingKind)
+            throws SQLException {
         ps.setString(1, site.getApi());
         ps.setString(2, site.getName());
         ps.setInt(3, site.getType());
-        ps.setString(4, ext);
-        ps.setString(5, site.getJar());
-        ps.setString(6, site.getKey());
-        ps.setString(7, site.getPlayUrl());
-        ps.setString(8, categories);
-        ps.setInt(9, site.getSearchable());
-        ps.setInt(10, site.getQuickSearch());
-        ps.setInt(11, site.getFilterable());
-        ps.setInt(12, order);
-        ps.setLong(13, now);
+        // 已存在时保留原有分类（管理员手动改过的不被导入覆盖），新记录自动推断
+        ps.setString(4, inferKind(site.getName(), site.getApi(), existingKind));
+        ps.setString(5, ext);
+        ps.setString(6, site.getJar());
+        ps.setString(7, site.getKey());
+        ps.setString(8, site.getPlayUrl());
+        ps.setString(9, categories);
+        ps.setInt(10, site.getSearchable());
+        ps.setInt(11, site.getQuickSearch());
+        ps.setInt(12, site.getFilterable());
+        ps.setInt(13, order);
+        ps.setLong(14, now);
+    }
+
+    /**
+     * 推断片源分类。
+     *
+     * <p>TVBox 配置里直播源和影视源都放在 {@code sites[]}（本配置的 {@code lives} 为空），
+     * 没有结构化标记，因此按名称关键词归类；管理员之后可以在片源页手动改。
+     *
+     * @param existingKind 已存在记录的分类；非空时原样保留，避免重复导入覆盖手工调整
+     */
+    private static String inferKind(String name, String api, String existingKind) {
+        if (existingKind != null && !existingKind.isBlank()) {
+            return existingKind;
+        }
+        String haystack = (name == null ? "" : name) + " " + (api == null ? "" : api);
+        String[] liveKeywords = {"直播", "看球", "回放", "体育", "赛事", "球赛", "卫视", "频道"};
+        for (String kw : liveKeywords) {
+            if (haystack.contains(kw)) {
+                return KIND_LIVE;
+            }
+        }
+        return KIND_VOD;
     }
 
     // ── 查询 ────────────────────────────────────────────────
 
     public List<SourceRow> list(boolean includeDisabled) throws SQLException {
-        String sql = """
-                SELECT id, uid, api, name, type, ext, jar, source_key, play_url, categories,
+        return list(includeDisabled, null);
+    }
+
+    /**
+     * 列出片源。
+     *
+     * @param kind 分类过滤：{@code vod}=影视源，{@code live}=直播源，null=全部
+     */
+    public List<SourceRow> list(boolean includeDisabled, String kind) throws SQLException {
+        StringBuilder sql = new StringBuilder("""
+                SELECT id, uid, api, name, type, kind, ext, jar, source_key, play_url, categories,
                        searchable, quick_search, filterable, enabled, sort_order, updated_at
                   FROM sources
-                """
-                + (includeDisabled ? "" : " WHERE enabled = 1")
-                + " ORDER BY sort_order ASC, id ASC";
+                """);
+        List<String> conditions = new ArrayList<>();
+        if (!includeDisabled) {
+            conditions.add("enabled = 1");
+        }
+        boolean filterKind = kind != null && !kind.isBlank();
+        if (filterKind) {
+            conditions.add("kind = ?");
+        }
+        if (!conditions.isEmpty()) {
+            sql.append(" WHERE ").append(String.join(" AND ", conditions));
+        }
+        sql.append(" ORDER BY sort_order ASC, id ASC");
+
         List<SourceRow> out = new ArrayList<>();
-        try (Connection conn = db.open(); PreparedStatement ps = conn.prepareStatement(sql);
-             ResultSet rs = ps.executeQuery()) {
-            while (rs.next()) {
-                out.add(new SourceRow(
-                        rs.getLong("id"), rs.getString("uid"), rs.getString("api"),
-                        rs.getString("name"), rs.getInt("type"), rs.getString("ext"),
-                        rs.getString("jar"), rs.getString("source_key"), rs.getString("play_url"),
-                        rs.getString("categories"), rs.getInt("searchable"),
-                        rs.getInt("quick_search"), rs.getInt("filterable"),
-                        rs.getInt("enabled") != 0, rs.getInt("sort_order"),
-                        rs.getLong("updated_at")));
+        try (Connection conn = db.open(); PreparedStatement ps = conn.prepareStatement(sql.toString())) {
+            if (filterKind) {
+                ps.setString(1, kind.trim());
+            }
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    out.add(new SourceRow(
+                            rs.getLong("id"), rs.getString("uid"), rs.getString("api"),
+                            rs.getString("name"), rs.getInt("type"), rs.getString("kind"),
+                            rs.getString("ext"),
+                            rs.getString("jar"), rs.getString("source_key"), rs.getString("play_url"),
+                            rs.getString("categories"), rs.getInt("searchable"),
+                            rs.getInt("quick_search"), rs.getInt("filterable"),
+                            rs.getInt("enabled") != 0, rs.getInt("sort_order"),
+                            rs.getLong("updated_at")));
+                }
             }
         }
         return out;
+    }
+
+    /** 修改片源分类（仅管理员）。 */
+    public boolean setKind(long id, String kind) throws SQLException {
+        String normalized = KIND_LIVE.equalsIgnoreCase(kind) ? KIND_LIVE : KIND_VOD;
+        synchronized (db.writeLock()) {
+            try (Connection conn = db.open();
+                 PreparedStatement ps = conn.prepareStatement(
+                         "UPDATE sources SET kind = ?, updated_at = ? WHERE id = ?")) {
+                ps.setString(1, normalized);
+                ps.setLong(2, System.currentTimeMillis());
+                ps.setLong(3, id);
+                return ps.executeUpdate() > 0;
+            }
+        }
     }
 
     public int count(boolean onlyEnabled) throws SQLException {
@@ -362,6 +436,7 @@ public class SourceService {
         m.put("api", row.api());
         m.put("name", row.name());
         m.put("type", row.type());
+        m.put("kind", row.kind());
         m.put("enabled", row.enabled());
         m.put("searchable", row.searchable());
         m.put("quickSearch", row.quickSearch());
@@ -383,6 +458,15 @@ public class SourceService {
             return sb.toString();
         } catch (Exception e) {
             return "db" + Math.abs((api + "|" + name).hashCode());
+        }
+    }
+
+    private static String existingKindOf(Connection conn, String uid) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement("SELECT kind FROM sources WHERE uid = ?")) {
+            ps.setString(1, uid);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getString("kind") : null;
+            }
         }
     }
 

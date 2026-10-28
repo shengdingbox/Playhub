@@ -136,6 +136,7 @@ public class DatabaseService {
                         api           TEXT    NOT NULL,
                         name          TEXT,
                         type          INTEGER NOT NULL DEFAULT 3,
+                        kind          TEXT    NOT NULL DEFAULT 'vod',
                         ext           TEXT,
                         jar           TEXT,
                         source_key    TEXT,
@@ -150,6 +151,19 @@ public class DatabaseService {
                         updated_at    INTEGER NOT NULL
                     )
                     """);
+            // 兼容早期版本的库：没有 kind 列时补上（vod=影视源 / live=直播源）
+            boolean kindAdded = ensureColumn(st, "sources", "kind", "TEXT NOT NULL DEFAULT 'vod'");
+            if (kindAdded) {
+                // 新增列时已有记录都会是默认的 vod，这里按名称把直播类片源纠正过来
+                int fixed = st.executeUpdate("""
+                        UPDATE sources SET kind = 'live'
+                         WHERE kind = 'vod' AND (
+                               name LIKE '%直播%' OR name LIKE '%看球%' OR name LIKE '%回放%'
+                            OR name LIKE '%体育%' OR name LIKE '%赛事%' OR name LIKE '%球赛%'
+                            OR name LIKE '%卫视%' OR name LIKE '%频道%')
+                        """);
+                log.info("[DB] 已按名称纠正 {} 个直播源分类", fixed);
+            }
             st.execute("CREATE INDEX IF NOT EXISTS idx_sources_enabled "
                     + "ON sources(enabled, sort_order)");
 
@@ -174,8 +188,8 @@ public class DatabaseService {
         return conn;
     }
 
-    /** 表里没有该列时补上（SQLite 没有 ADD COLUMN IF NOT EXISTS）。 */
-    private void ensureColumn(Statement st, String table, String column, String definition)
+    /** 表里没有该列时补上（SQLite 没有 ADD COLUMN IF NOT EXISTS）。返回 true 表示本次新增。 */
+    private boolean ensureColumn(Statement st, String table, String column, String definition)
             throws SQLException {
         boolean exists = false;
         try (var rs = st.executeQuery("PRAGMA table_info(" + table + ")")) {
@@ -189,7 +203,9 @@ public class DatabaseService {
         if (!exists) {
             st.execute("ALTER TABLE " + table + " ADD COLUMN " + column + " " + definition);
             log.info("[DB] 已为 {} 补充列 {}", table, column);
+            return true;
         }
+        return false;
     }
 
     /** 写操作串行化令牌，所有写事务必须持有它。 */

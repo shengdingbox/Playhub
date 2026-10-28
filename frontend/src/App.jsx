@@ -9,8 +9,26 @@ import PlayerView from './views/PlayerView'
 import HistoryView from './views/HistoryView'
 import LiveView from './views/LiveView'
 import SourcesView from './views/SourcesView'
+import SettingsView from './views/SettingsView'
 import LoginView from './views/LoginView'
 import { useStore } from './stores/useStore'
+import { Result, Button } from 'antd'
+
+/** 管理员专属路由：普通用户访问时给出提示，不暴露页面内容。 */
+function AdminRoute({ children }) {
+  const user = useStore((s) => s.user)
+  if (!user?.isAdmin) {
+    return (
+      <Result
+        status="403"
+        title="无权访问"
+        subTitle="该页面仅管理员可用"
+        style={{ padding: '80px 24px' }}
+      />
+    )
+  }
+  return children
+}
 
 function AnimatedRoutes() {
   const location = useLocation()
@@ -22,7 +40,8 @@ function AnimatedRoutes() {
         <Route path="/player" element={<PlayerView />} />
         <Route path="/history" element={<HistoryView />} />
         <Route path="/live" element={<LiveView />} />
-        <Route path="/sources" element={<SourcesView />} />
+        <Route path="/sources" element={<AdminRoute><SourcesView /></AdminRoute>} />
+        <Route path="/settings" element={<AdminRoute><SettingsView /></AdminRoute>} />
         {/* 未登录时 AuthGate 直接渲染登录页；这条路由用于手动访问 #/login */}
         <Route path="/login" element={<LoginView />} />
       </Routes>

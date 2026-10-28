@@ -14,6 +14,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.ArrayList;
@@ -25,8 +26,8 @@ import java.util.Set;
 /**
  * 片源库接口。
  *
- * <p>片源是<b>全局共享</b>的：管理员导入 / 维护一套片源，所有用户可见；
- * 每个用户再从中勾选自己要用的那些（勾选结果存账号）。
+ * <p>片源是<b>管理员专属</b>的功能：导入、维护、分类都只对管理员开放。
+ * 普通用户不接触片源库，登录后直接使用管理员配置的启用中的片源。
  */
 @RestController
 @RequestMapping("/api/sources")
@@ -49,16 +50,26 @@ public class SourceController {
     public record EnabledRequest(boolean enabled) {
     }
 
-    /** 片源列表；管理员能看到被停用的，普通用户只看启用的。同时返回自己的勾选状态。 */
+    public record KindRequest(String kind) {
+    }
+
+    /**
+     * 片源列表；管理员能看到被停用的，普通用户只看启用的。
+     *
+     * @param kind 分类过滤：{@code vod}=影视源，{@code live}=直播源；不传则全部
+     */
     @GetMapping
-    public ResponseEntity<?> list(HttpSession session) {
+    public ResponseEntity<?> list(@RequestParam(required = false) String kind, HttpSession session) {
         Long userId = AuthGuard.userId(session);
         if (userId == null) {
             return unauthorized();
         }
+        if (!AuthGuard.isAdmin(session)) {
+            return forbidden();
+        }
         try {
-            boolean admin = AuthGuard.isAdmin(session);
-            List<SourceService.SourceRow> rows = sourceService.list(admin);
+            boolean admin = true;
+            List<SourceService.SourceRow> rows = sourceService.list(admin, kind);
             Set<Long> choices = sourceService.getChoices(userId);
 
             List<Map<String, Object>> items = new ArrayList<>();
@@ -68,9 +79,21 @@ public class SourceController {
                 m.put("selected", choices.isEmpty() || choices.contains(row.id()));
                 items.add(m);
             }
+            // 分类统计（不受 kind 过滤影响，供前端 Tab 显示数量）
+            int vodCount = 0;
+            int liveCount = 0;
+            for (SourceService.SourceRow row : sourceService.list(admin, null)) {
+                if (SourceService.KIND_LIVE.equalsIgnoreCase(row.kind())) {
+                    liveCount++;
+                } else {
+                    vodCount++;
+                }
+            }
             Map<String, Object> out = new LinkedHashMap<>();
             out.put("sources", items);
             out.put("total", items.size());
+            out.put("vodCount", vodCount);
+            out.put("liveCount", liveCount);
             out.put("selectionsInitialized", !choices.isEmpty());
             out.put("isAdmin", admin);
             return ResponseEntity.ok(out);
@@ -85,6 +108,9 @@ public class SourceController {
         Long userId = AuthGuard.userId(session);
         if (userId == null) {
             return unauthorized();
+        }
+        if (!AuthGuard.isAdmin(session)) {
+            return forbidden();
         }
         try {
             Set<Long> choices = sourceService.getChoices(userId);
@@ -103,6 +129,9 @@ public class SourceController {
         Long userId = AuthGuard.userId(session);
         if (userId == null) {
             return unauthorized();
+        }
+        if (!AuthGuard.isAdmin(session)) {
+            return forbidden();
         }
         try {
             sourceService.setChoices(userId, body == null ? List.of() : body.sourceIds());
@@ -157,6 +186,22 @@ public class SourceController {
         } catch (Exception ex) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                     .body(Map.of("message", ex.getMessage()));
+        }
+    }
+
+    /** 修改片源分类（影视源 / 直播源），仅管理员。 */
+    @PatchMapping("/{id}/kind")
+    public ResponseEntity<?> setKind(@PathVariable long id, @RequestBody KindRequest body,
+                                     HttpSession session) {
+        if (!AuthGuard.isAdmin(session)) {
+            return forbidden();
+        }
+        try {
+            boolean ok = sourceService.setKind(id, body == null ? null : body.kind());
+            return ResponseEntity.ok(Map.of("success", ok));
+        } catch (Exception ex) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("message", "修改分类失败: " + ex.getMessage()));
         }
     }
 
