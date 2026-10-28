@@ -37,19 +37,58 @@ public class DatabaseService {
 
     private static final Logger log = LoggerFactory.getLogger(DatabaseService.class);
 
-    private final Path dbFile;
-    private final String jdbcUrl;
+    /** 首选位置（配置的 cache-dir）；不可写时会回退到临时目录，避免整个应用起不来。 */
+    private volatile Path dbFile;
+    private volatile String jdbcUrl;
     private final Object writeLock = new Object();
+
+    /** 构造时记下的首选数据库文件，供 init 失败时判断是否已回退过。 */
+    private final Path preferredDbFile;
 
     public DatabaseService(@Value("${app.cache-dir:.cache/tvbox}") String cacheDir) {
         Path dir = Paths.get(cacheDir == null || cacheDir.isBlank() ? ".cache/tvbox" : cacheDir);
-        this.dbFile = dir.resolve("playhub.db").toAbsolutePath();
+        this.preferredDbFile = dir.resolve("playhub.db").toAbsolutePath();
+        this.dbFile = preferredDbFile;
         this.jdbcUrl = "jdbc:sqlite:" + dbFile;
     }
 
+    /**
+     * 初始化数据库。
+     *
+     * <p><b>刻意不让异常冒出去</b>：容器里如果挂载了 volume，宿主机目录属主通常是 root，
+     * 非 root 运行的进程会写不进去。这种情况下如果直接抛异常，Spring 会判定 Bean 创建失败、
+     * 整个应用起不来，排查成本很高。所以这里改为「回退到临时目录 + 明确报错」，
+     * 让应用仍能启动并给出可读的日志。
+     */
     @PostConstruct
-    public void init() throws IOException, SQLException {
-        Files.createDirectories(dbFile.getParent());
+    public void init() {
+        try {
+            initAt(preferredDbFile);
+            return;
+        } catch (Exception ex) {
+            log.error("[DB] 无法在 {} 初始化数据库: {}", preferredDbFile, ex.getMessage());
+        }
+        // 回退：临时目录几乎总是可写
+        Path fallback = Paths.get(System.getProperty("java.io.tmpdir"), "playhub-data", "playhub.db")
+                .toAbsolutePath();
+        log.warn("[DB] 回退到临时目录: {}（容器重启后数据会丢失，请检查数据目录的挂载权限）", fallback);
+        try {
+            initAt(fallback);
+        } catch (Exception ex) {
+            log.error("[DB] 临时目录同样不可用，账号与播放记录功能将不可用: {}", ex.getMessage());
+        }
+    }
+
+    private void initAt(Path target) throws IOException, SQLException {
+        Path parent = target.getParent();
+        if (parent != null) {
+            Files.createDirectories(parent);
+            if (!Files.isWritable(parent)) {
+                throw new IOException("目录不可写: " + parent);
+            }
+        }
+        this.dbFile = target;
+        this.jdbcUrl = "jdbc:sqlite:" + target;
         try (Connection conn = open(); Statement st = conn.createStatement()) {
             // WAL 让读写可以并行，显著降低「锁表」概率
             st.execute("PRAGMA journal_mode=WAL");

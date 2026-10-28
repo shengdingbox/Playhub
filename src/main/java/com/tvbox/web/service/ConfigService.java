@@ -69,13 +69,36 @@ public class ConfigService {
         this.okHttpClient = HttpClientFactory.createOkHttp(35, 60);
     }
 
+    /**
+     * 准备缓存目录。
+     *
+     * <p><b>不让异常冒出去</b>：容器里挂载 volume 后目录可能不存在/不可写
+     * （宿主机目录属主是 root，进程以非 root 运行），
+     * 而 {@code @PostConstruct} 抛异常会让 Spring 判定 Bean 创建失败、整个应用起不来。
+     * 这里改为「回退到临时目录 + 明确报错」，保证应用仍能启动、日志能看懂问题。
+     */
     @PostConstruct
-    public void init() throws IOException {
-        Path configured = Paths.get(cacheDirConfig);
-        this.cacheDir = configured.isAbsolute()
-                ? configured.normalize()
-                : appPathsService.resolveFromBase(cacheDirConfig);
-        Files.createDirectories(cacheDir);
+    public void init() {
+        try {
+            Path configured = Paths.get(cacheDirConfig);
+            Path dir = configured.isAbsolute()
+                    ? configured.normalize()
+                    : appPathsService.resolveFromBase(cacheDirConfig);
+            Files.createDirectories(dir);
+            this.cacheDir = dir;
+            log.info("[CONFIG] 缓存目录: {}", dir);
+        } catch (Exception ex) {
+            Path fallback = Paths.get(System.getProperty("java.io.tmpdir"), "playhub-cache")
+                    .toAbsolutePath();
+            log.error("[CONFIG] 缓存目录 {} 不可用: {}；回退到 {}（重启后缓存/片源选择会丢失，"
+                    + "请检查挂载目录的属主与权限）", cacheDirConfig, ex.getMessage(), fallback);
+            try {
+                Files.createDirectories(fallback);
+            } catch (IOException ignore) {
+                // 临时目录也失败时保持 fallback 路径，后续写入会继续报错但不影响启动
+            }
+            this.cacheDir = fallback;
+        }
     }
 
     public synchronized ConfigPayload loadConfig(String rawUrl) {

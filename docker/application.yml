@@ -43,8 +43,3 @@ bridge:
   spider-jar-url: ${BRIDGE_SPIDER_JAR_URL:https://gh-proxy.com/https://raw.githubusercontent.com/qist/tvbox/master/xiaosa/spider.jar}
   config-url: ${BRIDGE_CONFIG_URL:https://gh-proxy.com/https://raw.githubusercontent.com/qist/tvbox/master/xiaosa/api.json}
   cache-dir: ${APP_CACHE_DIR:/opt/playhub/data/cache}
-  # 首次启动自动创建的管理员（已存在则不重置密码）
-  admin:
-    enabled: ${APP_ADMIN_ENABLED:true}
-    username: ${APP_ADMIN_USERNAME:admin}
-    password: ${APP_ADMIN_PASSWORD:playhub}
