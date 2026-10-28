@@ -113,16 +113,37 @@ RUN if [ "${USE_CN_MIRROR}" = "true" ]; then \
 ENV GITHUB_PROXY=${GITHUB_PROXY} \
     APP_GITHUB_PROXY=${GITHUB_PROXY}
 
+# ── 生成容器入口脚本 ─────────────────────────────────────────────────────────
+# 不用单独的文件：docker/ 目录被 .dockerignore 限制，且少一个文件就少一处同步遗漏。
+# 作用：以 root 修正 bind mount 目录属主后，降权到 playhub 运行 Java。
+# 注意 \$ 是为了让 Docker 不在这里展开，保留给运行时的 shell。
+RUN printf '%s\n' \
+      '#!/bin/sh' \
+      'set -e' \
+      'APP_JAR=app/playhub.jar' \
+      'APP_CFG=--spring.config.additional-location=file:config/application.yml' \
+      'if [ "\$(id -u)" = "0" ]; then' \
+      '  for d in /opt/playhub/data /opt/playhub/db /opt/playhub/logs /opt/playhub/.cache /opt/playhub/run; do' \
+      '    [ -d "\$d" ] && chown -R playhub:playhub "\$d" 2>/dev/null || true' \
+      '  done' \
+      '  if command -v setpriv >/dev/null 2>&1; then' \
+      '    exec setpriv --reuid playhub --regid playhub --clear-groups java \$JAVA_OPTS -jar "\$APP_JAR" "\$APP_CFG" "\$@"' \
+      '  fi' \
+      '  exec su playhub -s /bin/sh -c "exec java \$JAVA_OPTS -jar \$APP_JAR \$APP_CFG"' \
+      'fi' \
+      'exec java \$JAVA_OPTS -jar "\$APP_JAR" "\$APP_CFG" "\$@"' \
+    > /usr/local/bin/playhub-entrypoint.sh \
+    && chmod +x /usr/local/bin/playhub-entrypoint.sh
+
 WORKDIR /opt/playhub
 
 COPY target/playhub-*.jar app/playhub.jar
 COPY scripts/ scripts/
 COPY tools/dex-tools-v2.4/ tools/dex-tools-v2.4/
 COPY docker/application.yml config/application.yml
-COPY docker/entrypoint.sh /usr/local/bin/playhub-entrypoint.sh
 
-RUN mkdir -p data/cache logs run .cache/android-cache .cache/android-external .cache/android-files \
-    && chmod +x tools/dex-tools-v2.4/*.sh /usr/local/bin/playhub-entrypoint.sh \
+RUN mkdir -p data/cache db logs run .cache/android-cache .cache/android-external .cache/android-files \
+    && chmod +x tools/dex-tools-v2.4/*.sh \
     && find scripts -type d -name __pycache__ -prune -exec rm -rf {} + \
     && find scripts -type f -name "*.pyc" -delete \
     && groupadd -r playhub \

@@ -8,6 +8,8 @@
 !docker/
 docker/*
 !docker/application.yml
+# 允许 docker 目录下的脚本（以后若再加 entrypoint 之类的文件不会被误排除）
+!docker/*.sh
 
 # Keep dex2jar tools
 !tools/
