@@ -74,7 +74,8 @@ RUN set -eux; \
         python3 \
         python3-pip \
         python3-venv \
-        tzdata; \
+        tzdata \
+        util-linux; \
     rm -rf /var/lib/apt/lists/*
 
 # ── 2) pip 源（apt 装的 pip 可能不读 PIP_INDEX_URL，显式写一份全局配置）───────
@@ -118,20 +119,21 @@ COPY target/playhub-*.jar app/playhub.jar
 COPY scripts/ scripts/
 COPY tools/dex-tools-v2.4/ tools/dex-tools-v2.4/
 COPY docker/application.yml config/application.yml
+COPY docker/entrypoint.sh /usr/local/bin/playhub-entrypoint.sh
 
 RUN mkdir -p data/cache logs run .cache/android-cache .cache/android-external .cache/android-files \
-    && chmod +x tools/dex-tools-v2.4/*.sh \
+    && chmod +x tools/dex-tools-v2.4/*.sh /usr/local/bin/playhub-entrypoint.sh \
     && find scripts -type d -name __pycache__ -prune -exec rm -rf {} + \
     && find scripts -type f -name "*.pyc" -delete \
     && groupadd -r playhub \
     && useradd -r -g playhub -d /opt/playhub playhub \
     && chown -R playhub:playhub /opt/playhub
 
-USER playhub
-
+# 不在这里切到 playhub：entrypoint 需要 root 权限修正 bind mount 目录的属主，
+# 修正后再用 setpriv 降权运行 Java。容器内不会以 root 运行应用进程。
 EXPOSE 18080
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
     CMD curl -fsS "http://127.0.0.1:${APP_PORT}/api/health" >/dev/null || exit 1
 
-ENTRYPOINT ["sh", "-c", "exec java ${JAVA_OPTS} -jar app/playhub.jar --spring.config.additional-location=file:config/application.yml \"$@\"", "--"]
+ENTRYPOINT ["/usr/local/bin/playhub-entrypoint.sh"]

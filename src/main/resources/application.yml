@@ -16,6 +16,8 @@ spring:
 
 app:
   cache-dir: .cache/tvbox
+  # 数据库文件路径；留空则使用 cache-dir/playhub.db
+  db-path:
   # 首次启动自动创建的管理员账号（已存在则不会重置密码）
   admin:
     enabled: true

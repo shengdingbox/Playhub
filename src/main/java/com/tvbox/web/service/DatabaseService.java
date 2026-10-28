@@ -45,11 +45,23 @@ public class DatabaseService {
     /** 构造时记下的首选数据库文件，供 init 失败时判断是否已回退过。 */
     private final Path preferredDbFile;
 
-    public DatabaseService(@Value("${app.cache-dir:.cache/tvbox}") String cacheDir) {
-        Path dir = Paths.get(cacheDir == null || cacheDir.isBlank() ? ".cache/tvbox" : cacheDir);
-        this.preferredDbFile = dir.resolve("playhub.db").toAbsolutePath();
-        this.dbFile = preferredDbFile;
-        this.jdbcUrl = "jdbc:sqlite:" + dbFile;
+    /**
+     * @param dbPath   数据库文件路径（{@code app.db-path}）。留空时落在 {@code <cache-dir>/playhub.db}。
+     *                 Docker 部署建议单独指定，便于把库文件和缓存目录分开挂载。
+     * @param cacheDir 缓存根目录（{@code app.cache-dir}）
+     */
+    public DatabaseService(@Value("${app.db-path:}") String dbPath,
+                           @Value("${app.cache-dir:.cache/tvbox}") String cacheDir) {
+        Path target;
+        if (dbPath != null && !dbPath.isBlank()) {
+            target = Paths.get(dbPath.trim()).toAbsolutePath();
+        } else {
+            Path dir = Paths.get(cacheDir == null || cacheDir.isBlank() ? ".cache/tvbox" : cacheDir);
+            target = dir.resolve("playhub.db").toAbsolutePath();
+        }
+        this.preferredDbFile = target;
+        this.dbFile = target;
+        this.jdbcUrl = "jdbc:sqlite:" + target;
     }
 
     /**

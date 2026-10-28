@@ -17,6 +17,8 @@ logging:
 
 app:
   cache-dir: ${APP_CACHE_DIR:/opt/playhub/data/cache}
+  # 数据库文件：留空则用 <cache-dir>/playhub.db；Docker 里单独挂载更清晰
+  db-path: ${APP_DB_PATH:}
   # 首次启动自动创建的管理员（已存在则不重置密码）
   admin:
     enabled: ${APP_ADMIN_ENABLED:true}
