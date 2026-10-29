@@ -2,6 +2,7 @@ import { NavLink, Route, Routes, Navigate, UNSAFE_LocationContext, useNavigate }
 import LoginPage from './pages/LoginPage';
 import { fetchMe } from './api/auth';
 import TitleBar from './components/TitleBar';
+import PageErrorBoundary from './components/PageErrorBoundary';
 // 环境光背景场（四外壳共用的底层氛围层）
 import AppAmbient from './components/AppAmbient';
 import SearchPanel from './components/SearchPanel';
@@ -547,7 +548,7 @@ function AppShell() {
         {disclaim && DisclaimerModal}
         <main className="main">
           <Routes>
-            <Route path="/player" element={<PlayerPage />} />
+            <Route path="/player" element={<PageErrorBoundary><PlayerPage /></PageErrorBoundary>} />
           </Routes>
         </main>
       </div>
@@ -577,7 +578,15 @@ function AppShell() {
     { path: '/config', el: <ConfigPage /> },
     { path: '/about', el: <AboutPage /> },
   ];
-  const routeChildren = routeDefs.map((d) => <Route key={d.path} path={d.path} element={d.el} />);
+  // 每个页面单独兜住渲染异常：单页崩只在该页显示错误提示，不再整站白屏
+  // （Web 版没有主进程兜底，这个 ErrorBoundary 是最后一道防线）
+  const routeChildren = routeDefs.map((d) => (
+    <Route
+      key={d.path}
+      path={d.path}
+      element={<PageErrorBoundary>{d.el}</PageErrorBoundary>}
+    />
+  ));
 
   /**
    * **伪墓碑**路由（见 KeepAliveRoutes）：切页保持挂载、仅隐藏，返回零重载。
