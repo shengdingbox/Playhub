@@ -159,11 +159,29 @@ async function request<T>(path: string, init?: ReqInit): Promise<IpcResult<T>> {
   const r = await rawFetch(path, init);
   if (!r.ok) return r as IpcResult<T>;
   if (!r.data.trim()) return ok(undefined as T);
+  let parsed: unknown;
   try {
-    return ok(JSON.parse(r.data) as T);
+    parsed = JSON.parse(r.data);
   } catch {
     return err('bad-json', '后端返回的不是合法 JSON');
   }
+  // 统一解包后端信封：新接口（danmaku/meta/drive）返回 {ok:true,data} / {ok:false,error}，
+  // 老接口返回裸业务 JSON。不解包会让前端拿到双层结构（曾导致 sections.flatMap is not a function）。
+  if (parsed && typeof parsed === 'object' && 'ok' in parsed) {
+    const env = parsed as Record<string, unknown>;
+    if (env.ok === true && 'data' in env) {
+      return ok(env.data as T);
+    }
+    if (env.ok === false && 'error' in env) {
+      if (typeof env.error === 'string') {
+        return err('api', env.error);
+      }
+      const e = (env.error ?? {}) as Record<string, unknown>;
+      return err(String(e.code ?? 'api'), String(e.message ?? '请求失败'));
+    }
+    // 形如 {ok:true, message:"..."} 的业务对象（如 /api/config/load）：原样返回
+  }
+  return ok(parsed as T);
 }
 
 const post = <T>(path: string, body?: unknown): Promise<IpcResult<T>> => request<T>(path, { method: 'POST', body: body ?? {} });
