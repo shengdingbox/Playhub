@@ -134,6 +134,9 @@ async function rawFetch(path: string, init?: ReqInit): Promise<IpcResult<string>
     res = await fetch(path, {
       method: init?.method ?? 'GET',
       credentials: 'include', // cookie session 认证（api-mapping.md「认证」节）
+      // 一律不走 HTTP 缓存：否则 GET /api/config 会命中浏览器缓存，
+      // 出现「删除成功但列表还有这条记录」的假象（再点就报 id 不存在）。
+      cache: 'no-store',
       headers: init?.body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
       body: init?.body !== undefined ? JSON.stringify(init.body) : undefined,
     });
@@ -819,20 +822,52 @@ const api: Window['api'] = {
     },
     deleteSource: async (key: string) => {
       const id = await sourceIdOfKey(key).catch(() => null);
-      if (id == null) return err('not-found', `片源不存在：${key}`);
-      return request<void>(`/api/sources/${id}`, { method: 'DELETE' });
+      if (id == null) return err('not-found', `片源不存在：${key}（可能已被删除，请刷新）`);
+      const r = await request<Record<string, unknown>>(`/api/sources/${id}`, { method: 'DELETE' });
+      if (!r.ok) return r as IpcResult<void>;
+      // 后端 DELETE 返回 {success:true|false}（HTTP 一律 200）
+      if (rec(r.data).success === false) {
+        return err('not-found', '片源已不存在（可能已被删除，请刷新列表）');
+      }
+      return ok(undefined);
     },
     deleteSources: async (keys: string[]) => {
       const list = Array.isArray(keys) ? keys : [];
-      const rows = await fetchSourceRows().catch(() => []);
+      if (list.length === 0) return ok(undefined);
+      let rows: Record<string, unknown>[];
+      try {
+        rows = await fetchSourceRows();
+      } catch (e) {
+        return err('api', `读取片源库失败：${msgOf(e)}`);
+      }
+      let deleted = 0;
+      const failed: string[] = [];
       for (const k of list) {
         const hit =
           rows.find((x) => str(x.uid) === str(k)) ||
           rows.find((x) => str(x.sourceKey) === str(k)) ||
           rows.find((x) => str(x.name) === str(k));
-        if (hit) {
-          await request<void>(`/api/sources/${num(hit.id, 0)}`, { method: 'DELETE' });
+        if (!hit) {
+          failed.push(str(k));
+          continue;
         }
+        const r = await request<Record<string, unknown>>(`/api/sources/${num(hit.id, 0)}`, {
+          method: 'DELETE',
+        });
+        if (!r.ok || rec(r.data).success === false) {
+          failed.push(str(k));
+          continue;
+        }
+        deleted += 1;
+      }
+      // 有失败就如实报出来，绝不假装全成功
+      if (failed.length > 0) {
+        return err(
+          'partial',
+          deleted > 0
+            ? `已删除 ${deleted} 个，失败 ${failed.length} 个（可能已被删除，请刷新列表）`
+            : `删除失败：${failed.length} 个片源未找到（可能已被删除，请刷新列表）`,
+        );
       }
       return ok(undefined);
     },

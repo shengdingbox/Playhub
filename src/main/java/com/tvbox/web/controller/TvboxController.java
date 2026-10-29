@@ -1,5 +1,7 @@
 package com.tvbox.web.controller;
 
+import org.springframework.http.CacheControl;
+import org.springframework.http.ResponseEntity;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.tvbox.web.model.ConfigPayload;
 import com.tvbox.web.model.SiteDefinition;
@@ -98,8 +100,12 @@ public class TvboxController {
     }
 
     @GetMapping("/config")
-    public Map<String, Object> getConfig(HttpSession session) {
-        return stripConfig(facadeService.getConfig(session.getId()));
+    public ResponseEntity<Map<String, Object>> getConfig(HttpSession session) {
+        // 禁止浏览器/中间层缓存：片源被增删改后必须立刻反映到前端列表，
+        // 否则会出现「删除成功但列表还有这条」，再点就报「片源不存在」。
+        return ResponseEntity.ok()
+                .cacheControl(CacheControl.noStore())
+                .body(stripConfig(facadeService.getConfig(session.getId())));
     }
 
     @GetMapping("/health")
