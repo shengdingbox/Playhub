@@ -178,10 +178,23 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .mini-strip-close:hover { background: #e81123; color: #fff; }
 
 /* ---- 布局骨架 ---- */
-.app { display: flex; height: 100vh; }
+.app { display: flex; height: 100vh; height: 100dvh; overflow: hidden; }
 /* 独立播放器窗口：暗色背景承载视频，避免半透明 Mica 干扰观看 */
-.app.pwin { background: var(--surface-0); }
-.app.pwin .main { background: var(--surface-0); }
+/*
+ * 播放页严格锁定在视口内：
+ *   桌面版它是 Electron 的独立窗口，窗口本身就有边界；Web 版改成路由页后，
+ *   若仍按普通流式布局，某些情况（移动端 100vh 含浏览器工具栏、或某个子元素撑高）
+ *   会让整块播放器超出屏幕，底部控制条随之不可见。
+ *   position:fixed + inset:0 让它的尺寸恒等于视口，任何内部内容都无法把它顶出去。
+ */
+.app.pwin {
+  background: var(--surface-0);
+  position: fixed;
+  inset: 0;
+  height: auto;
+  overflow: hidden;
+}
+.app.pwin .main { background: var(--surface-0); min-height: 0; }
 .sidebar {
   width: var(--side-w); background: linear-gradient(180deg, var(--surface-2), var(--surface-1));
   border-right: 1px solid var(--border-soft); display: flex; flex-direction: column;
