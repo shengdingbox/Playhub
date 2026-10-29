@@ -19,6 +19,12 @@ public abstract class PackageManager {
         info.packageName = packageName == null ? "" : packageName;
         info.versionName = "3.0.4.0";
         info.versionCode = 2603002;
+        // 给一个固定签名，避免爬虫因 signatures 为 null 而空指针
+        byte[] fake = new byte[32];
+        for (int i = 0; i < fake.length; i++) {
+            fake[i] = (byte) (i * 7 + 13);
+        }
+        info.signatures = new Signature[]{new Signature(fake)};
         return info;
     }
 

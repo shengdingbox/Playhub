@@ -2,6 +2,7 @@ package android.content;
 
 import android.app.AppGlobals;
 import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageManager;
 import android.content.res.Resources;
 
 import java.io.File;
@@ -25,6 +26,14 @@ public class Context {
     public SharedPreferences getSharedPreferences(String name, int mode) {
         String key = (name == null || name.isBlank()) ? "default" : name;
         return PREFS.computeIfAbsent(key, ignored -> new SharedPreferences.InMemorySharedPreferences());
+    }
+
+    private static final PackageManager PACKAGE_MANAGER = new PackageManager() {
+    };
+
+    /** 部分加固爬虫会通过 PackageManager 读取自身版本/签名，这里返回桩实现。 */
+    public PackageManager getPackageManager() {
+        return PACKAGE_MANAGER;
     }
 
     public String getPackageName() {
