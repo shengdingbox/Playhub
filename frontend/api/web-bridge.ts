@@ -211,7 +211,42 @@ function proxyUrl(url: string, headers?: Record<string, string>): string {
   p.set('url', url);
   const hs = Object.entries(headers ?? {}).filter(([k, v]) => k.trim() && v.trim());
   if (hs.length) p.set('headers', base64Utf8(hs.map(([k, v]) => `${k}:${v}`).join('\n')));
-  return `/proxy?${p.toString()}`;
+  // 必须返回**绝对**地址：前端 playbackResult.directPlayUrlError 用 new URL() 校验，
+  // 相对路径会直接被判成「选集参数或相对路径」而拒绝播放。
+  return `${location.origin}/proxy?${p.toString()}`;
+}
+
+/**
+ * 是否已经是「本应用的代理地址」。
+ * 三种来源都要认：后端蜘蛛产出的 `http://127.0.0.1:<端口>/proxy?...`、
+ * 桌面版 9978 中继、以及已经是相对形式 `/proxy?...`。
+ */
+function isOwnProxyUrl(u: string): boolean {
+  if (u.startsWith('/proxy?')) return true;
+  try {
+    const parsed = new URL(u);
+    if (!/^https?:$/i.test(parsed.protocol)) return false;
+    if (parsed.pathname !== '/proxy') return false;
+    return (
+      parsed.hostname === location.hostname ||
+      parsed.hostname === '127.0.0.1' ||
+      parsed.hostname === 'localhost'
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** 把本应用代理地址的 origin 统一成当前页面 origin（保留原有 query，绝不二次包装）。 */
+function toOriginAbsolute(u: string): string {
+  if (u.startsWith('/')) return `${location.origin}${u}`;
+  try {
+    const parsed = new URL(u);
+    if (parsed.origin === location.origin) return u;
+    return `${location.origin}/proxy${parsed.search}`;
+  } catch {
+    return u;
+  }
 }
 
 /** 桌面版 9978 中继地址（蜘蛛可能直接产出）→ Web 同源 /proxy；非中继地址原样返回 */
@@ -300,6 +335,10 @@ function playUrlForWeb(raw: string, header: Record<string, string>): string {
     .map((seg) => {
       const s = seg.trim();
       if (!s) return s;
+      // ① 已经是本应用的代理地址（后端蜘蛛产出 127.0.0.1:<端口>/proxy 或相对 /proxy）
+      //    → 只把 origin 换成当前站点，**绝不二次包装**（否则 URL 层层嵌套且可能变相对路径）
+      if (isOwnProxyUrl(s)) return toOriginAbsolute(s);
+      // ② 桌面版 9978 中继 → 重包成本源 /proxy
       if (s.startsWith(LOCAL_PROXY_BASE)) return rewrapLocalRelay(s);
       const { url, headers: tail } = splitUrlHeaders(s);
       const merged = { ...tail, ...header };
