@@ -52,3 +52,6 @@ __pycache__/
 
 # 老前端备份（Win-box 移植前的 AntD 版）
 frontend-old/
+
+# 运行日志（本地/容器生成）
+.logs/
