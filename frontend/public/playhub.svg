@@ -1,10 +1,1 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="PlayHub">
-  <defs>
-    <linearGradient id="playhub-bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#1677ff"/>
-      <stop offset="1" stop-color="#722ed1"/>
-    </linearGradient>
-  </defs>
-  <rect width="64" height="64" rx="14" fill="url(#playhub-bg)"/>
-  <path d="M25.5 18.9v26.2a2.2 2.2 0 0 0 3.35 1.88l21.1-13.1a2.2 2.2 0 0 0 0-3.76l-21.1-13.1a2.2 2.2 0 0 0-3.35 1.88z" fill="#fff"/>
-</svg>
+﻿<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1677ff"/><stop offset="1" stop-color="#722ed1"/></linearGradient></defs><rect width="64" height="64" rx="14" fill="url(#g)"/><path d="M25.5 18.9v26.2a2.2 2.2 0 0 0 3.35 1.88l21.1-13.1a2.2 2.2 0 0 0 0-3.76l-21.1-13.1a2.2 2.2 0 0 0-3.35 1.88z" fill="#fff"/></svg>

@@ -23,6 +23,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 @RestController
@@ -71,6 +72,28 @@ public class TvboxController {
         slim.put("flags", payload.getFlags() != null ? payload.getFlags() : new ArrayList<>());
         slim.put("liveCount", payload.getLives() != null ? payload.getLives().size() : 0);
         slim.put("ruleCount", payload.getRules() != null ? payload.getRules().size() : 0);
+        // 直播线路的元数据（name/url/epg），供 Web 前端选择线路后走 /api/live/bootstrap
+        // 只保留关键字段，不把整份（可能内嵌大体积频道列表）暴露给首页
+        List<Map<String, Object>> liveList = new ArrayList<>();
+        if (payload.getLives() != null) {
+            for (JsonNode live : payload.getLives()) {
+                if (live == null || !live.isObject()) {
+                    continue;
+                }
+                Map<String, Object> item = new LinkedHashMap<>();
+                item.put("name", live.path("name").asText(""));
+                // TVBox lives 的地址字段形态不一：url / urls[0].url / channels[0].urls[0]
+                String url = live.path("url").asText("");
+                if (url.isEmpty() && live.path("urls").isArray() && live.path("urls").size() > 0) {
+                    url = live.path("urls").path(0).path("url").asText("");
+                }
+                item.put("url", url);
+                item.put("epg", live.path("epg").asText(""));
+                item.put("ua", live.path("ua").asText(""));
+                liveList.add(item);
+            }
+        }
+        slim.put("lives", liveList);
         return slim;
     }
 

@@ -49,3 +49,6 @@ __screenshots__/
 # Python 缓存
 __pycache__/
 *.pyc
+
+# 老前端备份（Win-box 移植前的 AntD 版）
+frontend-old/
