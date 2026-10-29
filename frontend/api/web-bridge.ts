@@ -30,6 +30,7 @@
 //     POST /api/meta/setSettings  <patch>                             → MetaSettingsView
 //     POST /api/meta/suggest      {q}                                 → MetaSuggestion[]
 //     POST /api/meta/images       {mediaType, tmdbId}                 → MetaImages
+import { DEFAULT_DANMAKU_SETTINGS } from '../../shared/danmaku';
 import { BUILTIN_VOCAB } from '../../shared/discover';
 import { DEFAULT_META_SETTINGS } from '../../shared/meta';
 import type { IpcErr, IpcResult } from '../../shared/ipc-result';
@@ -921,12 +922,21 @@ const api: Window['api'] = {
   // 弹幕：search/episodes/fetch 走后端；get/set 是**前端偏好**，存 localStorage
   danmaku: (() => {
     const KEY = 'playhub:danmaku-settings';
+    // 必须回落到 DEFAULT_DANMAKU_SETTINGS：VideoPlayer 会直接读 dmCfg.endpoints.filter(...)，
+    // 返回 {} 会让 endpoints 为 undefined 而崩。
     const read = (): Record<string, unknown> => {
       try {
-        return JSON.parse(localStorage.getItem(KEY) || '{}') as Record<string, unknown>;
+        const raw = localStorage.getItem(KEY);
+        if (raw) {
+          return {
+            ...DEFAULT_DANMAKU_SETTINGS,
+            ...(JSON.parse(raw) as Record<string, unknown>),
+          };
+        }
       } catch {
-        return {};
+        /* fallthrough */
       }
+      return { ...DEFAULT_DANMAKU_SETTINGS };
     };
     return {
       get: () => Promise.resolve(ok(read() as any)),
