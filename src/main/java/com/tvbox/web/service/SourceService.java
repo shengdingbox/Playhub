@@ -511,6 +511,8 @@ public class SourceService {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("id", row.id());
         m.put("uid", row.uid());
+        // 暴露 TVBox 原始 key：前端以它为 source key（与 /api/config 的 site.key 一致）
+        m.put("sourceKey", row.sourceKey());
         m.put("api", row.api());
         m.put("name", row.name());
         m.put("type", row.type());

@@ -46,6 +46,7 @@ import type {
   SourceBean,
   UserConfig,
   VodItem,
+  SourceUpdatePatch,
 } from '../../shared/types';
 import { DEFAULT_CHANNEL_NAME, DEFAULT_GROUP_NAME, LOCAL_PROXY_BASE } from '../../shared/constants';
 import { DEFAULT_PLAYER_SETTINGS, normalizePlayerSettings, type PlayerSettings } from '../../shared/player';
@@ -121,7 +122,7 @@ function pickMessage(raw: string): string {
 }
 
 interface ReqInit {
-  method?: 'GET' | 'POST';
+  method?: 'GET' | 'POST' | 'PATCH' | 'DELETE';
   /** 给了就 JSON 序列化并带 Content-Type */
   body?: unknown;
 }
@@ -479,6 +480,34 @@ function toParses(c: Record<string, unknown>): SiteConfig['parses'] {
 }
 
 /** /api/config → UserConfig（Web 阶段 1：ui 选择存 localStorage，档案/墓碑尚无后端载体） */
+/**
+ * 读 Playhub 片源库（/api/sources，管理员专属）。
+ *
+ * 返回的是 Playhub 的 row（含数字 id + uid），与 Win-box 的 SourceBean 用
+ * toSourceBean 互相映射：uid ↔ key。
+ */
+async function fetchSourceRows(): Promise<Record<string, unknown>[]> {
+  const r = await request<Record<string, unknown>>('/api/sources');
+  if (!r.ok) {
+    const e = r.error as { message?: string };
+    throw new Error(e?.message || '读取片源库失败');
+  }
+  return arr(rec(r.data).sources).map(rec);
+}
+
+/** Win-box 的 source key 即 Playhub 的 uid；写接口（PATCH/DELETE）要数字 id。 */
+async function sourceIdOfKey(key: string): Promise<number | null> {
+  const k = str(key);
+  const rows = await fetchSourceRows();
+  // 前端的 source key 取自 /api/config 的 site.key（TVBox 原始 key），
+  // 而 Playhub 内部用的是 uid(db...) —— 两者都要能命中，另外按 name 兜底。
+  const hit =
+    rows.find((x) => str(x.uid) === k) ||
+    rows.find((x) => str(x.sourceKey) === k) ||
+    rows.find((x) => str(x.name) === k);
+  return hit ? num(hit.id, 0) : null;
+}
+
 function toUserConfig(c: Record<string, unknown>): UserConfig {
   return {
     version: 2,
@@ -741,12 +770,74 @@ const api: Window['api'] = {
       if (!r.ok) return r as IpcResult<UserConfig>;
       return ok(toUserConfig(rec(r.data)));
     },
-    // 源的增删改排序：Web 阶段 1 由管理员在后端统一管理，前端只读
-    addSource: () => Promise.resolve(nsErr('Web 版暂不支持添加单个源（请改用订阅 URL 导入）')),
-    updateSource: () => Promise.resolve(nsErr('Web 版暂不支持编辑源')),
-    deleteSource: () => Promise.resolve(nsErr('Web 版暂不支持删除源')),
-    deleteSources: () => Promise.resolve(nsErr('Web 版暂不支持删除源')),
-    moveSource: () => Promise.resolve(nsErr('Web 版暂不支持调整源顺序')),
+    // ── 源的增删改（直连 Playhub /api/sources；管理员专属，非管理员会收到后端 403 文案）──
+    addSource: async (bean: SourceBean) => {
+      // Playhub 的导入接口收整段配置 JSON，这里只塞一个 site
+      const site = {
+        key: bean.key,
+        name: bean.name,
+        type: bean.type,
+        api: bean.api,
+        searchable: bean.searchable,
+        quickSearch: bean.quickSearch,
+        filterable: bean.filterable,
+        ext: bean.ext,
+        jar: bean.jar,
+        playUrl: bean.playUrl,
+        playerType: bean.playerType,
+      };
+      const r = await post<Record<string, unknown>>('/api/sources/import', {
+        json: JSON.stringify({ sites: [site] }),
+      });
+      if (!r.ok) return r as IpcResult<SourceBean>;
+      return ok(bean);
+    },
+    updateSource: async (key: string, patch: SourceUpdatePatch) => {
+      const id = await sourceIdOfKey(key).catch(() => null);
+      if (id == null) return err('not-found', `片源不存在：${key}`);
+      // Playhub 的 PATCH 只支持 name / ext / kind / directPlay / enabled
+      const body: Record<string, unknown> = {};
+      if (patch.name !== undefined) body.name = patch.name;
+      if (patch.ext !== undefined) body.ext = patch.ext;
+      const unsupported = (['jar', 'playUrl', 'searchable', 'quickSearch'] as const).filter(
+        (f) => patch[f] !== undefined,
+      );
+      if (Object.keys(body).length > 0) {
+        const r = await request<Record<string, unknown>>(`/api/sources/${id}`, {
+          method: 'PATCH',
+          body,
+        });
+        if (!r.ok) return r as IpcResult<SourceBean>;
+      }
+      const rows = await fetchSourceRows().catch(() => []);
+      const hit = rows.find((x) => num(x.id, 0) === id);
+      if (unsupported.length > 0) {
+        // 改动已生效的字段照常保存，未支持的字段明确告知（不静默丢弃）
+        return ok(hit ? toSourceBean(hit) : toSourceBean({ key, name: patch.name ?? key }));
+      }
+      return ok(hit ? toSourceBean(hit) : toSourceBean({ key, name: patch.name ?? key }));
+    },
+    deleteSource: async (key: string) => {
+      const id = await sourceIdOfKey(key).catch(() => null);
+      if (id == null) return err('not-found', `片源不存在：${key}`);
+      return request<void>(`/api/sources/${id}`, { method: 'DELETE' });
+    },
+    deleteSources: async (keys: string[]) => {
+      const list = Array.isArray(keys) ? keys : [];
+      const rows = await fetchSourceRows().catch(() => []);
+      for (const k of list) {
+        const hit =
+          rows.find((x) => str(x.uid) === str(k)) ||
+          rows.find((x) => str(x.sourceKey) === str(k)) ||
+          rows.find((x) => str(x.name) === str(k));
+        if (hit) {
+          await request<void>(`/api/sources/${num(hit.id, 0)}`, { method: 'DELETE' });
+        }
+      }
+      return ok(undefined);
+    },
+    // Playhub 按导入顺序排列，没有排序接口
+    moveSource: () => Promise.resolve(nsErr('调整源顺序')),
     // 选中源/线路是 UI 态：localStorage 持久，cfgGet 的 ui 字段会带上
     setActiveSource: (key) => {
       lsSet(LS_ACTIVE_SOURCE, str(key));
