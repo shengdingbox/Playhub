@@ -30,6 +30,8 @@
 //     POST /api/meta/setSettings  <patch>                             → MetaSettingsView
 //     POST /api/meta/suggest      {q}                                 → MetaSuggestion[]
 //     POST /api/meta/images       {mediaType, tmdbId}                 → MetaImages
+import { BUILTIN_VOCAB } from '../../shared/discover';
+import { DEFAULT_META_SETTINGS } from '../../shared/meta';
 import type { IpcErr, IpcResult } from '../../shared/ipc-result';
 import { err, ok } from '../../shared/ipc-result';
 import type {
@@ -946,14 +948,24 @@ const api: Window['api'] = {
       doubanExtra: (name: string, year?: string) => post('/api/meta/doubanExtra', { name, year }),
       discover: (refresh?: boolean) => post('/api/meta/discover', { refresh: !!refresh }),
       doubanReview: () => Promise.resolve(ok(null as any)),
-      movieHot: () => Promise.resolve(ok({ tabs: [], items: [] } as any)),
+      movieHot: () =>
+        Promise.resolve(ok({ source: 'baidu', items: [], fetchedAt: 0, stale: true } as any)),
       discoverImages: () => Promise.resolve(ok({ backdrops: [], posters: [] } as any)),
       genres: () => Promise.resolve(ok({ movie: [], tv: [] } as any)),
       genrePage: (_m: unknown, _g: unknown, page: number) =>
-        Promise.resolve(ok({ items: [], page, pagecount: 0 } as any)),
-      discoverQuery: () => Promise.resolve(ok(null as any)),
-      exploreVocab: () => Promise.resolve(ok(null as any)),
-      getSettings: () => Promise.resolve(ok(read() as any)),
+        Promise.resolve(ok({ items: [], page, totalPages: 0 } as any)),
+      discoverQuery: () =>
+        Promise.resolve(ok({ items: [], start: 0, total: 0, hasMore: false } as any)),
+      exploreVocab: () => Promise.resolve(ok(BUILTIN_VOCAB as any)),
+      getSettings: () =>
+        Promise.resolve(
+          ok({
+            ...DEFAULT_META_SETTINGS,
+            ...read(),
+            hasBuiltin: false,
+            hasUserKey: !!read().tmdbApiKey,
+          } as any),
+        ),
       setSettings: (patch: Record<string, unknown>) => {
         const next = { ...read(), ...(patch ?? {}) };
         try {
