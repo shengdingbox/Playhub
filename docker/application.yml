@@ -7,6 +7,15 @@ server:
     accept-count: ${SERVER_TOMCAT_ACCEPT_COUNT:12}
 
 spring:
+  web:
+    resources:
+      # 静态资源不走浏览器缓存：
+      #   index.html 不带内容 hash，一旦被缓存就会继续引用旧 bundle，
+      #   表现为「前端改动不生效」（例如片源删除后列表不刷新）。
+      #   assets/ 下的文件名带 hash，本来就不会串版本，这里一并 no-cache 换取确定性。
+      cache:
+        cachecontrol:
+          no-cache: true
   jackson:
     serialization:
       indent-output: true

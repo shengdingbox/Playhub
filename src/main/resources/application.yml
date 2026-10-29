@@ -8,6 +8,11 @@ server:
     max-http-response-header-size: 8KB
 
 spring:
+  web:
+    resources:
+      cache:
+        cachecontrol:
+          no-cache: true
   jackson:
     serialization:
       indent-output: true
