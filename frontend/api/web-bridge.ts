@@ -898,44 +898,124 @@ const api: Window['api'] = {
   })(),
 
   // 弹幕 / 元数据：端点契约见文件头注释（后端 teammate C 补齐后自动可用；404 会包成 err 上屏）
-  danmaku: {
-    get: () => post('/api/danmaku/get'),
-    set: (patch) => post('/api/danmaku/set', patch ?? {}),
-    search: (name, season) => post('/api/danmaku/search', { name, season }),
-    episodes: (bangumiId, animeTitle, source) => post('/api/danmaku/episodes', { bangumiId, animeTitle, source }),
-    fetch: (episodeId, source) => post('/api/danmaku/fetch', { episodeId, source }),
-  },
-  meta: {
-    search: (name, year, provider) => post('/api/meta/search', { name, year, provider }),
-    extra: (name, year) => post('/api/meta/extra', { name, year }),
-    doubanExtra: (name, year) => post('/api/meta/doubanExtra', { name, year }),
-    doubanReview: (reviewId) => post('/api/meta/doubanReview', { reviewId }),
-    discover: (refresh) => post('/api/meta/discover', { refresh: !!refresh }),
-    movieHot: () => post('/api/meta/movieHot'),
-    discoverImages: (name, mediaType, year, kind, doubanId) => post('/api/meta/discoverImages', { name, mediaType, year, kind, doubanId }),
-    genres: () => post('/api/meta/genres'),
-    genrePage: (mediaType, genreId, page) => post('/api/meta/genrePage', { mediaType, genreId, page }),
-    discoverQuery: (q) => post('/api/meta/discoverQuery', q ?? {}),
-    exploreVocab: () => post('/api/meta/exploreVocab'),
-    getSettings: () => post('/api/meta/getSettings'),
-    setSettings: (patch) => post('/api/meta/setSettings', patch ?? {}),
-    suggest: (q) => post('/api/meta/suggest', { q }),
-    images: (mediaType, tmdbId) => post('/api/meta/images', { mediaType, tmdbId }),
-  },
+  // 弹幕：search/episodes/fetch 走后端；get/set 是**前端偏好**，存 localStorage
+  danmaku: (() => {
+    const KEY = 'playhub:danmaku-settings';
+    const read = (): Record<string, unknown> => {
+      try {
+        return JSON.parse(localStorage.getItem(KEY) || '{}') as Record<string, unknown>;
+      } catch {
+        return {};
+      }
+    };
+    return {
+      get: () => Promise.resolve(ok(read() as any)),
+      set: (patch: Record<string, unknown>) => {
+        const next = { ...read(), ...(patch ?? {}) };
+        try {
+          localStorage.setItem(KEY, JSON.stringify(next));
+        } catch {
+          /* 隐私模式写不进去时忽略 */
+        }
+        return Promise.resolve(ok(next as any));
+      },
+      search: (name: string, season?: number) => post('/api/danmaku/search', { name, season }),
+      episodes: (bangumiId: number, animeTitle: string | undefined, source: string) =>
+        post('/api/danmaku/episodes', { bangumiId, animeTitle, source }),
+      fetch: (episodeId: number, source: string) =>
+        post('/api/danmaku/fetch', { episodeId, source }),
+    };
+  })(),
 
-  // 网盘绑定（扫码/网页登录都依赖主进程能力，阶段 1 全部不可用）
-  drives: {
-    get: () => Promise.resolve(ok({})),
-    set: () => Promise.resolve(nsErr('网盘绑定')),
-    remove: () => Promise.resolve(nsErr('网盘绑定')),
-    qrCreate: () => Promise.resolve(nsErr('网盘扫码登录')),
-    qrPoll: () => Promise.resolve(nsErr('网盘扫码登录')),
-    webLogin: () => Promise.resolve(nsErr('网盘网页登录')),
-    ucTvStatus: () => Promise.resolve(ok({ bound: false })),
-    ucTvQrCreate: () => Promise.resolve(nsErr('UC TV 授权')),
-    ucTvQrPoll: () => Promise.resolve(nsErr('UC TV 授权')),
-    ucTvRemove: () => Promise.resolve(nsErr('UC TV 授权')),
-  },
+  // 元数据：search/extra/doubanExtra/discover 走后端；
+  //   其余后端暂未实现（阶段 2 范围外）→ 返回空数据让 UI 优雅降级，而不是弹错误；
+  //   getSettings/setSettings 属前端偏好，存 localStorage。
+  meta: (() => {
+    const KEY = 'playhub:meta-settings';
+    const read = (): Record<string, unknown> => {
+      try {
+        return JSON.parse(localStorage.getItem(KEY) || '{}') as Record<string, unknown>;
+      } catch {
+        return {};
+      }
+    };
+    return {
+      search: (name: string, year?: string, provider?: string) =>
+        post('/api/meta/search', { name, year, provider }),
+      extra: (name: string, year?: string) => post('/api/meta/extra', { name, year }),
+      doubanExtra: (name: string, year?: string) => post('/api/meta/doubanExtra', { name, year }),
+      discover: (refresh?: boolean) => post('/api/meta/discover', { refresh: !!refresh }),
+      doubanReview: () => Promise.resolve(ok(null as any)),
+      movieHot: () => Promise.resolve(ok({ tabs: [], items: [] } as any)),
+      discoverImages: () => Promise.resolve(ok({ backdrops: [], posters: [] } as any)),
+      genres: () => Promise.resolve(ok({ movie: [], tv: [] } as any)),
+      genrePage: (_m: unknown, _g: unknown, page: number) =>
+        Promise.resolve(ok({ items: [], page, pagecount: 0 } as any)),
+      discoverQuery: () => Promise.resolve(ok(null as any)),
+      exploreVocab: () => Promise.resolve(ok(null as any)),
+      getSettings: () => Promise.resolve(ok(read() as any)),
+      setSettings: (patch: Record<string, unknown>) => {
+        const next = { ...read(), ...(patch ?? {}) };
+        try {
+          localStorage.setItem(KEY, JSON.stringify(next));
+        } catch {
+          /* 忽略 */
+        }
+        return Promise.resolve(ok(next as any));
+      },
+      suggest: () => Promise.resolve(ok([] as any)),
+      images: () => Promise.resolve(ok({ backdrops: [], posters: [] } as any)),
+    };
+  })(),
+
+  // 网盘：接后端 /api/drive/*（阶段 2）
+  //   后端这些接口返回 {ok:true,data} / {ok:false,error} 信封，而 request() 已把响应体
+  //   JSON.parse 后又包了一层 ok()，这里统一解包成单层 IpcResult。
+  drives: (() => {
+    const call = async <T>(path: string, init?: ReqInit): Promise<IpcResult<T>> => {
+      const r = await request<Record<string, unknown>>(path, init);
+      if (!r.ok) return r;
+      const d: Record<string, unknown> = r.data ?? {};
+      if (typeof d === 'object' && d !== null && 'ok' in d) {
+        if (d.ok === true) return ok(d.data as T);
+        const e = (d.error ?? {}) as Record<string, unknown>;
+        return err(String(e.code ?? 'api'), String(e.message ?? '请求失败'));
+      }
+      return ok(d as T);
+    };
+    return {
+      get: () => call<Record<string, string>>('/api/drive/list'),
+      set: (a: { provider: string; token: string }) =>
+        call<void>('/api/drive/set', { method: 'POST', body: a }),
+      remove: (provider: string) =>
+        call<void>('/api/drive/remove', { method: 'POST', body: { provider } }),
+      qrCreate: (provider?: string) =>
+        call<{ provider: string; content: string; imageDataUrl?: string; sid: string }>(
+          '/api/drive/qrCreate',
+          { method: 'POST', body: { provider } },
+        ),
+      qrPoll: (provider: string, sid: string) =>
+        call<{
+          state: number;
+          token?: string;
+          tokenKind?: 'refresh_token' | 'cookie' | 'access_token';
+          username?: string;
+          hint?: string;
+        }>('/api/drive/qrPoll', { method: 'POST', body: { provider, sid } }),
+      webLogin: (provider: string) =>
+        call<void>('/api/drive/webLogin', { method: 'POST', body: { provider } }),
+      ucTvStatus: () => call<{ bound: boolean }>('/api/drive/ucTvStatus'),
+      ucTvQrCreate: () =>
+        call<{ imageDataUrl: string }>('/api/drive/ucTvQrCreate', { method: 'POST', body: {} }),
+      ucTvQrPoll: () =>
+        call<{ state: 'wait' | 'ok' | 'expired' | 'error'; hint?: string }>(
+          '/api/drive/ucTvQrPoll',
+          { method: 'POST', body: {} },
+        ),
+      ucTvRemove: () =>
+        call<void>('/api/drive/ucTvRemove', { method: 'POST', body: {} }),
+    };
+  })(),
 
   // 窗口管理：浏览器没有对应能力；close 在播放器页做了合理模拟（关标签页 / 返回上一页）
   win: {

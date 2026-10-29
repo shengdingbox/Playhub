@@ -80,7 +80,7 @@ public class JarSpiderService implements DisposableBean, InitializingBean {
 
     private static final Pattern PLAY_URL_PREFIX_PATTERN = Pattern.compile("^[^,，]{1,30}[,，](.+)$");
     private static final String RUNTIME_PATCH_VERSION = "compat-20260423g";
-    private static final String DEX_PATCH_VERSION = "compat-20260421a";
+    private static final String DEX_PATCH_VERSION = "compat-20261029a";
     private static final String GLOBAL_SESSION_KEY = "__global__";
 
     private final ConfigService configService;
@@ -1897,6 +1897,21 @@ public class JarSpiderService implements DisposableBean, InitializingBean {
         Path marker = jarPath.resolveSibling(jarPath.getFileName() + ".patched");
         if (Files.exists(marker)) {
             return;
+        }
+        // dex2jar 会把 super.m(...) 错转成 invokespecial 本类.m；极简 Proxy 也需要
+        // 在产物级补全。增强步骤失败只记日志，绝不让原本可加载的产物变成失败。
+        try {
+            Integer port = parseServerPort();
+            String proxyUrlPrefix = port == null ? null : "http://127.0.0.1:" + port + "/proxy?do=";
+            SpiderClassPatcher.PatchReport report = SpiderClassPatcher.patchJar(
+                    jarPath, proxyUrlPrefix, JarSpiderService.class.getClassLoader());
+            if (report.getChangedClasses() > 0) {
+                String detail = report.getDetails().stream().limit(6).collect(Collectors.joining("；"));
+                log.info("[JAR] 转换产物兼容修补完成: selfSuper={} proxy={} classes={} {}",
+                        report.getSelfSuperPatches(), report.isProxyPatched(), report.getChangedClasses(), detail);
+            }
+        } catch (Exception ex) {
+            log.warn("[JAR] 转换产物兼容修补失败（保留原产物）: {}", ex.getMessage());
         }
         try (java.nio.file.FileSystem jarFs = FileSystems.newFileSystem(URI.create("jar:" + jarPath.toUri()), Map.of())) {
             patchClassAccessFlags(jarFs.getPath("/com/github/catvod/spider/merge/A0/wk.class"));

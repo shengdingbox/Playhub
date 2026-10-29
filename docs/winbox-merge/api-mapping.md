@@ -76,15 +76,73 @@ Playhub 现有接口直接返回 JSON（如 `{sites:[...]}` 或爬虫原始 Json
 ## 前端路由
 
 Win-box 用 react-router-dom v7 + HashRouter。页面：
-- `/` HomePage（首页：分类 + 视频墙）
-- `/discover` DiscoverPage（发现页）
+- `/` DiscoverPage（发现页，默认首页）
+- `/home` HomePage（点播：分类 + 视频墙）
+- `/search` HomePage（全源搜索）
 - `/detail/:key/:id` DetailPage
 - `/player` PlayerPage（播放，从详情跳转）
 - `/live` LivePage
 - `/history` HistoryPage
 - `/favorites` FavoritesPage
-- `/storage` StoragePage（片源管理）
+- `/storage` StoragePage（WebDAV）
 - `/config` ConfigPage（设置）
 - `/about` AboutPage
+- `/login` LoginPage（**Web 版新增**，AuthGate 守卫）
 
-需新增：`/login`（Web 版需要登录）
+---
+
+# 阶段 2 契约（网盘 / 磁力 / 蜘蛛兼容性）
+
+## 网盘（drives）
+
+前端 `client.ts` 有 10 个调用点，后端端点：
+
+| 前端方法 | 端点 | 说明 |
+|---|---|---|
+| driveGet | `GET /api/drive/list` | 返回 `{provider: token}` 映射 |
+| driveSet(provider, token) | `POST /api/drive/set` `{provider,token}` | 手动绑定凭据 |
+| driveRemove(provider) | `POST /api/drive/remove` `{provider}` | 解绑 |
+| driveQrCreate(provider?) | `POST /api/drive/qrCreate` `{provider?}` | 扫码登录（可占位） |
+| driveQrPoll(provider,sid) | `POST /api/drive/qrPoll` `{provider,sid}` | 扫码轮询（可占位） |
+| driveWebLogin(provider) | `POST /api/drive/webLogin` `{provider}` | 可返回 not-supported |
+| ucTv*（4 个） | `/api/drive/ucTv*` | 可整体 not-supported |
+| （浏览/播放） | `POST /api/drive/browse`、`POST /api/drive/playUrl` | 由适配层接 |
+
+优先级：夸克/UC 的「粘贴 token 绑定 + 浏览 + 取播放地址」跑通即可。
+
+## 磁力（BT）—— **透明集成在播放链路，不是独立前端接口**
+
+⚠ 前端 `bt.*` 只有 `detectPlayers`（Web 返回空数组）。磁力是后端自动处理的：
+
+```
+TvboxFacadeService.play() 返回前
+  → 若 result.url 以 "magnet:" 开头
+  → torrentService.open(magnet)      // aria2 添加 + 等首块落盘
+  → 成功：url 改写为 "/proxy?do=bt&gid=<gid>&file=<idx>"，parse=0
+  → 失败：保留原 magnet + message 人话提示（不抛异常）
+
+ProxyController 的 do=bt 分支：
+  GET /proxy?do=bt&gid=x&file=n
+  → 解析 Range 头
+  → torrentService.waitRange(gid, file, start, end)  // 等 piece 落盘，超时→503
+  → RandomAccessFile 从 absPath+fileOffset+start 读字节
+  → 206 Partial Content + Content-Range
+```
+
+参考：Win-box `src/main/torrent/torrentPlay.ts`（301 行）、`Aria2Sidecar.ts`（247 行）、`SpiderHost.ts:3028 tryMagnetPlay`。
+
+aria2 缺失时返回明确错误「aria2 未安装」，不崩溃。
+
+## 蜘蛛引擎兼容性（转换产物修补）
+
+两个「就地修补」机制，在 dex2jar 转换产物生成后、加载前运行：
+
+1. **classFix**：dex2jar 把 `invoke-super` 转成自递归 `invokespecial`（owner 指向本类）→ StackOverflowError。
+   修复 = 把该 Methodref 的 `class_index` 就地改写成 `super_class`（2 字节改写，不重排字节码）。
+   护栏：只改「invokespecial 指向本类同名同签名」的引用；该 Methodref 仅被这一处使用；不碰 private/<init>/<clinit>；方法必须在超类链上声明。
+   影响面：整族盘搜蜘蛛（Pan/MiPan/PanSou/Baiku/KuLe 等）的 init 全栈溢出。
+
+2. **appProxyStub**：jar 自带的极简 `com/github/catvod/spider/Proxy`（只有 `proxy(Map)`+`<init>`）缺 `getProxyUrlDo(String)` → NoSuchMethodError。
+   修复 = 仅当是极简形态时补上该方法（返回 `/proxy?do=` + 参数）；形态不符不动。
+
+**不需要移植 okhttp4Compat**：Playhub 已用 okhttp 4.12.0 + kotlin-stdlib 1.9.25（打包已含），4.x 天然支持两种 `RequestBody.create` 参数序。

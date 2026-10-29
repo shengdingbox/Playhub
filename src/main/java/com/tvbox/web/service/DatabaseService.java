@@ -181,6 +181,15 @@ public class DatabaseService {
             st.execute("CREATE INDEX IF NOT EXISTS idx_sources_enabled "
                     + "ON sources(enabled, sort_order)");
 
+            // 网盘绑定凭据：一个 provider 一行，应用级共享（与 Win-box DriveStore 口径一致）
+            st.execute("""
+                    CREATE TABLE IF NOT EXISTS drive_tokens (
+                        provider   TEXT    PRIMARY KEY,
+                        token      TEXT    NOT NULL,
+                        updated_at INTEGER NOT NULL
+                    )
+                    """);
+
             // 用户勾选了哪些片源；没有记录时视为「全部启用」
             st.execute("""
                     CREATE TABLE IF NOT EXISTS user_source_choice (

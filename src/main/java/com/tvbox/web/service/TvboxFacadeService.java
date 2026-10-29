@@ -27,6 +27,7 @@ public class TvboxFacadeService {
     private final ConfigService configService;
     private final HttpSourceService httpSourceService;
     private final JarSpiderService jarSpiderService;
+    private final TorrentService torrentService;
     private final BoundedCache<String, CachedPlayResult> playCache = new BoundedCache<>(512);
 
     private static class CachedPlayResult {
@@ -45,10 +46,12 @@ public class TvboxFacadeService {
 
     public TvboxFacadeService(ConfigService configService,
                               HttpSourceService httpSourceService,
-                              JarSpiderService jarSpiderService) {
+                              JarSpiderService jarSpiderService,
+                              TorrentService torrentService) {
         this.configService = configService;
         this.httpSourceService = httpSourceService;
         this.jarSpiderService = jarSpiderService;
+        this.torrentService = torrentService;
     }
 
     public ConfigPayload load(String url) {
@@ -415,7 +418,7 @@ public class TvboxFacadeService {
         CachedPlayResult cached = playCache.get(cacheKey);
         if (cached != null && !cached.isExpired()) {
             log.info("[PLAY] cache hit for key={} flag={} id={}", key, flag, id);
-            return applyDirectPlay(safeSite(sessionId, key), cached.result);
+            return applyMagnetPlay(applyDirectPlay(safeSite(sessionId, key), cached.result));
         }
 
         SiteDefinition site = getSite(sessionId, key);
@@ -445,7 +448,41 @@ public class TvboxFacadeService {
         }
 
         playCache.put(cacheKey, new CachedPlayResult(result));
-        return applyDirectPlay(site, result);
+        return applyMagnetPlay(applyDirectPlay(site, result));
+    }
+
+    /**
+     * 磁力透明接力：缓存里始终保留片源原始结果，每次播放时再把 magnet 换成本地 BT 流。
+     * 引擎缺失、无做种或超时都不能弄坏原播放结果，只附加可复制链接自行下载的提示。
+     */
+    private JsonNode applyMagnetPlay(JsonNode result) {
+        if (result == null || !result.isObject()) {
+            return result;
+        }
+        JsonNode urlNode = result.get("url");
+        if (urlNode == null || !urlNode.isTextual()) {
+            return result;
+        }
+        String magnet = urlNode.asText("").trim();
+        if (!magnet.regionMatches(true, 0, "magnet:", 0, 7)) {
+            return result;
+        }
+
+        ObjectNode copy = ((ObjectNode) result).deepCopy();
+        try {
+            String streamUrl = torrentService.open(magnet);
+            copy.put("url", streamUrl);
+            copy.put("parse", 0);
+            copy.put("playUrl", "");
+            copy.remove("header");
+            log.info("[PLAY] 磁力已接入 BT 边下边播: {}", streamUrl);
+        } catch (RuntimeException ex) {
+            String reason = ex.getMessage() == null ? "未知 BT 引擎错误" : ex.getMessage();
+            copy.put("message", "磁力边下边播不可用：" + reason
+                    + "。可复制磁力链接，使用 qBittorrent / 迅雷 / Motrix 等工具下载播放");
+            log.warn("[PLAY] 磁力起播失败，保留原链接: {}", reason);
+        }
+        return copy;
     }
 
     /** 免代理直连：片源勾了「不需要代理」时，把代理地址还原成原始地址。 */
